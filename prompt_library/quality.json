@@ -1,0 +1,517 @@
+{
+  "id": "entry_1756523826983_bl81igtsu",
+  "name": "quality",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "quality"
+  ],
+  "groups": [
+    {
+      "name": "base1",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "masterpiece",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "best quality",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "amazing quality",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "very aesthetic",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "very awa",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "absurdres",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "newest",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "cinematic compotision",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "ultra-detailed",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "beautiful detailed",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "finely detailed",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "perfect face",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "highres",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        },
+        {
+          "context": "16K",
+          "active": true,
+          "order_index": 14,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "base2",
+      "active": false,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "masterpiece",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "best quality",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "amazing quality",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "highres",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "absurdres",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "newest",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "very aesthetic",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "extreme aesthetic",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "sensitive",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "very awa",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "incredibly absurdres",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "8K",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "ultra detailed",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        },
+        {
+          "context": "HDR",
+          "active": true,
+          "order_index": 14,
+          "weight": "1"
+        },
+        {
+          "context": "high contrast",
+          "active": true,
+          "order_index": 15,
+          "weight": "1"
+        },
+        {
+          "context": "high detail RAW color art",
+          "active": true,
+          "order_index": 16,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "optional1",
+      "active": false,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "supreme masterpiece",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "official art",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "best quality",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "cinematic",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "fashion photography style",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "dramatic",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "visual impact",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "ultra-high resolution",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "sharp focus",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "intricate details",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "high-end texture",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "dramatic lighting",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "colorful",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        },
+        {
+          "context": "emotional",
+          "active": true,
+          "order_index": 14,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "lighting",
+      "active": false,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "cinematic lighting",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "dramatic lighting",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "volumetric lighting",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "god rays",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "rim lighting",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "dramatic shadows",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "soft lighting",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "golden hour lighting",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "base_pvc",
+      "active": false,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "masterpiece",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "best quality",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "absurdres",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "newest",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "very aesthetic",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "amazing quality",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "highres",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "sensitive",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "highres",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "ultra detailed",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "best anatomy",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "HDR",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "8K",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        },
+        {
+          "context": "high detail RAW color art",
+          "active": true,
+          "order_index": 14,
+          "weight": "1"
+        },
+        {
+          "context": "high contrast",
+          "active": true,
+          "order_index": 15,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    }
+  ],
+  "expansionStates": {
+    "Group 1": true,
+    "Group 2": true,
+    "Group 3": true,
+    "Group 4": true,
+    "Group 5": true,
+    "Group 6": true,
+    "optional1": true,
+    "base2": true,
+    "base1": true,
+    "default": true,
+    "base_pvc": true,
+    "lighting": true
+  },
+  "createDate": "2025-08-30T03:17:06.983Z",
+  "lastEdit": "2025-10-04T09:30:10.085Z",
+  "prefix": ""
+}

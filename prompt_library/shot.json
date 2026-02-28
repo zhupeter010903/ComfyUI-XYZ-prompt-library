@@ -1,0 +1,87 @@
+{
+  "id": "entry_1756575398995_u43ilvl2g",
+  "name": "shot",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [],
+  "groups": [
+    {
+      "name": "dynamic",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "A shot with tension",
+          "active": true,
+          "order_index": 1,
+          "weight": "1.1"
+        },
+        {
+          "context": "Dynamic and visually striking",
+          "active": true,
+          "order_index": 2,
+          "weight": "1.1"
+        },
+        {
+          "context": "visual impact",
+          "active": true,
+          "order_index": 3,
+          "weight": "1.2"
+        },
+        {
+          "context": "impactful picture",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "offcial art",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "colorful",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "movie perspective",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "advertising style",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "scenery",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail"
+    }
+  ],
+  "expansionStates": {
+    "Group 1": true,
+    "Group 10": true
+  },
+  "createDate": "2025-08-30T17:36:38.995Z",
+  "lastEdit": "2025-08-30T17:38:18.032Z"
+}

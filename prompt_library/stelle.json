@@ -1,0 +1,70 @@
+{
+  "id": "entry_1757873585862_1mhvn3fce",
+  "name": "stelle",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "girl",
+    "honkai"
+  ],
+  "groups": [
+    {
+      "name": "name",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "stelle \\(honkai: star rail\\)",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple"
+    },
+    {
+      "name": "face",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "grey hair",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "yellow eyes",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple"
+    }
+  ],
+  "expansionStates": {
+    "Group 2": true,
+    "Group 1": true
+  },
+  "createDate": "2025-09-14T18:13:05.862Z",
+  "lastEdit": "2025-09-14T18:13:36.456Z"
+}

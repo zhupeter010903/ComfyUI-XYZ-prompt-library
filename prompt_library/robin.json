@@ -1,0 +1,64 @@
+{
+  "id": "entry_1760153898554_odqwwdx5i",
+  "name": "robin",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "girl",
+    "honkai"
+  ],
+  "groups": [
+    {
+      "name": "name",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "robin \\(honkai: star rail\\)",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side"
+    },
+    {
+      "name": "face",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "blue hair",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "green eyes",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "head wings",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side"
+    }
+  ],
+  "expansionStates": {
+    "Group 1": true,
+    "Group 2": true
+  },
+  "createDate": "2025-10-11T03:38:18.554Z",
+  "lastEdit": "2025-10-11T03:39:11.984Z"
+}

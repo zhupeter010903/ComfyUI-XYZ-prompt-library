@@ -1,0 +1,8 @@
+{
+  "name": "test",
+  "enabled": true,
+  "weight": "1",
+  "random_count": "0",
+  "status": "default",
+  "items": []
+}

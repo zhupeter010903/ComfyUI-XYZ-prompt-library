@@ -1,0 +1,91 @@
+{
+  "id": "entry_1756526645227_w19amea7r",
+  "name": "kuo shenlin",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "character",
+    "assault lily",
+    "girl"
+  ],
+  "groups": [
+    {
+      "name": "name",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "kuo shenlin",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "assault_lily ",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail"
+    },
+    {
+      "name": "face",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "brown hair",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "long hair",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "side ponytail",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "heterochromia",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "red eyes",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "yellow eyes",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side"
+    }
+  ],
+  "expansionStates": {
+    "Group 2": true,
+    "Group 1": true,
+    "name": true,
+    "face": true
+  },
+  "createDate": "2025-08-30T04:04:05.227Z",
+  "lastEdit": "2025-08-30T04:26:44.349Z"
+}

@@ -1,0 +1,98 @@
+{
+  "id": "entry_1756764210003_c7ouzghsq",
+  "name": "copyright",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [],
+  "groups": [
+    {
+      "name": "mecha",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "3",
+      "prompts": [
+        {
+          "context": "copyright:azur lane",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "copyright:blue archive",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "copyright:kouyoku_senki_exs-tia",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "copyright:master of eternity",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "goddess_of_victory:_nikke",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "brown_dust_(series)",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "copyright:blue  archive",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "copyright:crossover",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "copyright:daraku gear",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    }
+  ],
+  "expansionStates": {
+    "default": true,
+    "machine": true,
+    "latex": true,
+    "Group 4": true,
+    "Group 1": true,
+    "mecha": true,
+    "base1": true,
+    "base2": true,
+    "optional1": true,
+    "lighting": true,
+    "base_pvc": true
+  },
+  "createDate": "2025-09-01T22:03:30.003Z",
+  "lastEdit": "2026-02-08T17:21:32.689Z",
+  "prefix": ""
+}

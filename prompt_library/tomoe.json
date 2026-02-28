@@ -1,0 +1,71 @@
+{
+  "id": "entry_1756758896366_gdeo3l8o4",
+  "name": "tomoe",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "vtuber",
+    "girl",
+    "crossick"
+  ],
+  "groups": [
+    {
+      "name": "name",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "shirayuki_tomoe",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple"
+    },
+    {
+      "name": "face",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "long black hair",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "orange eyes",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple"
+    }
+  ],
+  "expansionStates": {
+    "Group 1": true,
+    "Group 2": true
+  },
+  "createDate": "2025-09-01T20:34:56.366Z",
+  "lastEdit": "2025-09-01T20:35:45.776Z"
+}

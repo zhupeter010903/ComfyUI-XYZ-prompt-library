@@ -1,0 +1,560 @@
+{
+  "id": "entry_1756524650806_asuql5x8m",
+  "name": "artist_combo",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "1",
+  "tags": [
+    "artist"
+  ],
+  "groups": [
+    {
+      "name": "Group 1",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "chen bin",
+          "active": true,
+          "order_index": 1,
+          "weight": "1.2"
+        },
+        {
+          "context": "atdan",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "shuri \\(84k\\)",
+          "active": true,
+          "order_index": 3,
+          "weight": "0.8"
+        },
+        {
+          "context": "hiten \\(hitenkei\\)",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "wlop",
+          "active": true,
+          "order_index": 5,
+          "weight": "0.8"
+        },
+        {
+          "context": "ningen mame",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    },
+    {
+      "name": "JRU厚涂",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "ningen mame",
+          "active": true,
+          "order_index": 1,
+          "weight": "0.7"
+        },
+        {
+          "context": "reoen",
+          "active": true,
+          "order_index": 2,
+          "weight": "0.85"
+        },
+        {
+          "context": "nababa",
+          "active": true,
+          "order_index": 3,
+          "weight": "0.3"
+        },
+        {
+          "context": "wanke",
+          "active": true,
+          "order_index": 4,
+          "weight": "0.4"
+        },
+        {
+          "context": "modare",
+          "active": true,
+          "order_index": 5,
+          "weight": "0.6"
+        },
+        {
+          "context": "wlop",
+          "active": true,
+          "order_index": 6,
+          "weight": "0.6"
+        },
+        {
+          "context": "rei \\(sanbonzakura\\)",
+          "active": true,
+          "order_index": 7,
+          "weight": "0.4"
+        },
+        {
+          "context": "offical art",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "厚线条绫波丽",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "yd \\(orange maru\\)",
+          "active": true,
+          "order_index": 1,
+          "weight": "0.9"
+        },
+        {
+          "context": "misaki kurehito",
+          "active": true,
+          "order_index": 2,
+          "weight": "0.8"
+        },
+        {
+          "context": "na tarapisu153",
+          "active": true,
+          "order_index": 3,
+          "weight": "1.3"
+        },
+        {
+          "context": "akizone",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "光影立体感增强",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "impressionism",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "impasto",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "3d",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "wanke",
+          "active": true,
+          "order_index": 4,
+          "weight": "0.81"
+        },
+        {
+          "context": "nababa",
+          "active": true,
+          "order_index": 5,
+          "weight": "0.81"
+        },
+        {
+          "context": "Torino aqua",
+          "active": true,
+          "order_index": 6,
+          "weight": "1.1"
+        },
+        {
+          "context": "suzumi \\(ccroquette\\)",
+          "active": true,
+          "order_index": 7,
+          "weight": "1.331"
+        },
+        {
+          "context": "wolp",
+          "active": true,
+          "order_index": 8,
+          "weight": "1.1"
+        },
+        {
+          "context": "nixue",
+          "active": true,
+          "order_index": 9,
+          "weight": "1.1"
+        },
+        {
+          "context": "ciloranko",
+          "active": true,
+          "order_index": 10,
+          "weight": "0.81"
+        },
+        {
+          "context": "rei \\(sanbonzakura\\)",
+          "active": true,
+          "order_index": 11,
+          "weight": "1.21"
+        },
+        {
+          "context": "love cacao",
+          "active": true,
+          "order_index": 12,
+          "weight": "1.21"
+        },
+        {
+          "context": "year 2024",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "韩风描边",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "dishwasher1910",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "fuya \\(tempupupu\\)",
+          "active": true,
+          "order_index": 2,
+          "weight": "0.8"
+        },
+        {
+          "context": "shion \\(mirudakemann\\)",
+          "active": true,
+          "order_index": 3,
+          "weight": "0.6"
+        },
+        {
+          "context": "wada arco",
+          "active": true,
+          "order_index": 4,
+          "weight": "1.1"
+        },
+        {
+          "context": "bartolomeobari",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "michking",
+          "active": true,
+          "order_index": 6,
+          "weight": "0.6"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "国风淡雅",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "liduke",
+          "active": true,
+          "order_index": 1,
+          "weight": "1.2"
+        },
+        {
+          "context": "stu dts",
+          "active": true,
+          "order_index": 2,
+          "weight": "0.8"
+        },
+        {
+          "context": "wlop",
+          "active": true,
+          "order_index": 3,
+          "weight": "0.8"
+        },
+        {
+          "context": "ningen mame",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "rella",
+          "active": true,
+          "order_index": 5,
+          "weight": "0.8"
+        },
+        {
+          "context": "ciloranko",
+          "active": true,
+          "order_index": 6,
+          "weight": "0.6"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "银月常用",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "sola7764",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "jima",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "rhasta",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail",
+      "prefix": ""
+    },
+    {
+      "name": "官方艺术",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "amagi hana",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "2gong \\(9ujin\\)",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "Ogipote",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "taya oco",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "seasonanimes",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "offical art",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail",
+      "prefix": ""
+    },
+    {
+      "name": "渡边富城",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "watanabe tomari",
+          "active": true,
+          "order_index": 1,
+          "weight": "1.05"
+        },
+        {
+          "context": "fjsmu",
+          "active": true,
+          "order_index": 2,
+          "weight": "0.7"
+        },
+        {
+          "context": "watari \\(nijimukiokuiro\\)",
+          "active": true,
+          "order_index": 3,
+          "weight": "0.85"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail",
+      "prefix": ""
+    },
+    {
+      "name": "本庄雷太",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "artist:quasarcake",
+          "active": true,
+          "order_index": 1,
+          "weight": "0.8"
+        },
+        {
+          "context": "wlop",
+          "active": true,
+          "order_index": 2,
+          "weight": "0.6"
+        },
+        {
+          "context": "honjou raita",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "lack",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "rella",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "wanke",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail",
+      "prefix": ""
+    }
+  ],
+  "expansionStates": {
+    "Group 1": true,
+    "Group 2": true,
+    "Group 3": true,
+    "Group 4": true,
+    "Group 5": true,
+    "Group 6": true,
+    "Group 7": true,
+    "国风淡雅": false,
+    "Group 8": true,
+    "Group 9": true,
+    "官方艺术": false,
+    "银月常用": false,
+    "渡边富城": false,
+    "Group 10": true,
+    "name": true,
+    "style": true,
+    "clothes": true,
+    "face": true
+  },
+  "createDate": "2025-08-30T03:30:50.806Z",
+  "lastEdit": "2025-09-02T08:22:19.349Z",
+  "prefix": ""
+}

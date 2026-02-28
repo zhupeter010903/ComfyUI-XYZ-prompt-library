@@ -1,0 +1,80 @@
+{
+  "id": "entry_1756526528643_xtz2kbktc",
+  "name": "wang yujia",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "character",
+    "assault lily",
+    "girl"
+  ],
+  "groups": [
+    {
+      "name": "name",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "wang yujia",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "assault_lily ",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "detail"
+    },
+    {
+      "name": "face",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "black hair",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "long hair",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "low ponytail",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "green eyes",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side"
+    }
+  ],
+  "expansionStates": {
+    "Group 1": true,
+    "Group 2": true,
+    "name": true,
+    "Group 3": true,
+    "face": true
+  },
+  "createDate": "2025-08-30T04:02:08.643Z",
+  "lastEdit": "2025-08-30T04:26:49.435Z"
+}

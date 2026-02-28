@@ -1,0 +1,435 @@
+/* Grouped Prompt Node Styles */
+
+/* Main container styles */
+.grouped-prompt-container {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    sans-serif;
+  color: #f4f4f5;
+}
+
+/* Header styles */
+.grouped-prompt-header {
+  background: rgba(40, 44, 52, 0.6) !important;
+  border: 1px solid rgba(226, 232, 240, 0.2) !important;
+  border-radius: 6px !important;
+}
+
+.grouped-prompt-header button {
+  background: rgba(66, 153, 225, 0.9) !important;
+  border: none !important;
+  border-radius: 4px !important;
+  color: white !important;
+  padding: 6px 12px !important;
+  font-size: 12px !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+}
+
+.grouped-prompt-header button:hover {
+  background: rgba(66, 153, 225, 1) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Template dropdown styles */
+.template-dropdown {
+  background: rgba(45, 55, 72, 0.7) !important;
+  border: 1px solid rgba(226, 232, 240, 0.2) !important;
+  border-radius: 4px !important;
+  color: rgba(226, 232, 240, 0.8) !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  min-width: 120px !important;
+}
+
+.template-dropdown:focus {
+  border-color: rgba(66, 153, 225, 0.8) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25) !important;
+}
+
+/* Prompt group item styles */
+.prompt-group-item {
+  background: rgba(45, 55, 72, 0.4) !important;
+  border: 1px solid rgba(226, 232, 240, 0.1) !important;
+  border-radius: 6px !important;
+  transition: all 0.2s ease !important;
+}
+
+.prompt-group-item:hover {
+  background: rgba(45, 55, 72, 0.6) !important;
+  border-color: rgba(226, 232, 240, 0.2) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Prompt tag item styles */
+.prompt-tag-item {
+  background: rgba(40, 44, 52, 0.3) !important;
+  border: 1px solid rgba(226, 232, 240, 0.1) !important;
+  border-radius: 4px !important;
+  margin: 2px 0 !important;
+  transition: all 0.2s ease !important;
+}
+
+.prompt-tag-item:hover {
+  background: rgba(40, 44, 52, 0.5) !important;
+  border-color: rgba(226, 232, 240, 0.2) !important;
+}
+
+/* Prompt subgroup item styles */
+.prompt-subgroup-item {
+  background: rgba(40, 44, 52, 0.2) !important;
+  border: 1px solid rgba(226, 232, 240, 0.1) !important;
+  border-radius: 4px !important;
+  margin: 4px 0 !important;
+  transition: all 0.2s ease !important;
+}
+
+.prompt-subgroup-item:hover {
+  background: rgba(40, 44, 52, 0.4) !important;
+  border-color: rgba(226, 232, 240, 0.2) !important;
+}
+
+/* Subgroup content styles */
+.subgroup-content {
+  margin-left: 20px !important;
+  padding-left: 8px !important;
+  border-left: 2px solid rgba(226, 232, 240, 0.1) !important;
+}
+
+/* Toggle button styles */
+.toggle-button {
+  width: 20px !important;
+  height: 20px !important;
+  border-radius: 4px !important;
+  border: 1px solid rgba(226, 232, 240, 0.3) !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 12px !important;
+}
+
+.toggle-button.enabled {
+  background: rgba(66, 153, 225, 0.9) !important;
+  border-color: rgba(66, 153, 225, 0.9) !important;
+  color: white !important;
+}
+
+.toggle-button.disabled {
+  background: rgba(45, 55, 72, 0.7) !important;
+  border-color: rgba(226, 232, 240, 0.2) !important;
+  color: rgba(226, 232, 240, 0.6) !important;
+}
+
+.toggle-button:hover {
+  transform: scale(1.1) !important;
+}
+
+/* Editable input styles */
+.editable-input {
+  background: rgba(35, 35, 35, 0.8) !important;
+  border: 1px solid rgba(226, 232, 240, 0.2) !important;
+  border-radius: 4px !important;
+  color: #ccc !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  transition: all 0.2s ease !important;
+}
+
+.editable-input:focus {
+  border-color: rgba(66, 153, 225, 0.8) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25) !important;
+}
+
+/* Weight input styles */
+.weight-input {
+  width: 60px !important;
+  background: rgba(35, 35, 35, 0.8) !important;
+  border: 1px solid rgba(226, 232, 240, 0.2) !important;
+  border-radius: 4px !important;
+  color: #ccc !important;
+  padding: 4px 6px !important;
+  font-size: 11px !important;
+  text-align: center !important;
+  transition: all 0.2s ease !important;
+}
+
+.weight-input:focus {
+  border-color: rgba(66, 153, 225, 0.8) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25) !important;
+}
+
+/* Move button styles */
+.move-button {
+  width: 24px !important;
+  height: 24px !important;
+  background: rgba(45, 55, 72, 0.7) !important;
+  border: 1px solid rgba(226, 232, 240, 0.2) !important;
+  border-radius: 4px !important;
+  color: rgba(226, 232, 240, 0.8) !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 12px !important;
+  transition: all 0.2s ease !important;
+}
+
+.move-button:hover {
+  background: rgba(45, 55, 72, 0.9) !important;
+  border-color: rgba(226, 232, 240, 0.4) !important;
+  color: white !important;
+  transform: translateY(-1px) !important;
+}
+
+/* Remove button styles */
+.remove-button {
+  width: 24px !important;
+  height: 24px !important;
+  background: rgba(239, 68, 68, 0.8) !important;
+  border: 1px solid rgba(239, 68, 68, 0.8) !important;
+  border-radius: 4px !important;
+  color: white !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 14px !important;
+  transition: all 0.2s ease !important;
+}
+
+.remove-button:hover {
+  background: rgba(239, 68, 68, 1) !important;
+  border-color: rgba(239, 68, 68, 1) !important;
+  transform: scale(1.1) !important;
+}
+
+/* Expand button styles */
+.expand-button {
+  width: 24px !important;
+  height: 24px !important;
+  background: rgba(66, 153, 225, 0.7) !important;
+  border: 1px solid rgba(66, 153, 225, 0.7) !important;
+  border-radius: 4px !important;
+  color: white !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 12px !important;
+  transition: all 0.2s ease !important;
+}
+
+.expand-button:hover {
+  background: rgba(66, 153, 225, 0.9) !important;
+  border-color: rgba(66, 153, 225, 0.9) !important;
+  transform: translateY(-1px) !important;
+}
+
+/* Random candidate toggle styles */
+.random-toggle {
+  width: 20px !important;
+  height: 20px !important;
+  border-radius: 50% !important;
+  border: 1px solid rgba(226, 232, 240, 0.3) !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 10px !important;
+}
+
+.random-toggle.enabled {
+  background: rgba(139, 92, 246, 0.9) !important;
+  border-color: rgba(139, 92, 246, 0.9) !important;
+  color: white !important;
+}
+
+.random-toggle.disabled {
+  background: rgba(45, 55, 72, 0.7) !important;
+  border-color: rgba(226, 232, 240, 0.2) !important;
+  color: rgba(226, 232, 240, 0.6) !important;
+}
+
+.random-toggle:hover {
+  transform: scale(1.1) !important;
+}
+
+/* Move dropdown styles */
+.move-dropdown {
+  background: rgba(45, 55, 72, 0.7) !important;
+  border: 1px solid rgba(226, 232, 240, 0.2) !important;
+  border-radius: 4px !important;
+  color: rgba(226, 232, 240, 0.8) !important;
+  padding: 4px 6px !important;
+  font-size: 11px !important;
+  min-width: 80px !important;
+}
+
+.move-dropdown:focus {
+  border-color: rgba(66, 153, 225, 0.8) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.25) !important;
+}
+
+/* Add button styles */
+.add-button {
+  background: rgba(34, 197, 94, 0.8) !important;
+  border: 1px solid rgba(34, 197, 94, 0.8) !important;
+  border-radius: 4px !important;
+  color: white !important;
+  padding: 6px 12px !important;
+  font-size: 11px !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+}
+
+.add-button:hover {
+  background: rgba(34, 197, 94, 1) !important;
+  border-color: rgba(34, 197, 94, 1) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Placeholder styles */
+.groups-placeholder {
+  text-align: center !important;
+  padding: 40px 20px !important;
+  color: rgba(226, 232, 240, 0.6) !important;
+  font-style: italic !important;
+}
+
+/* Detailed window styles */
+.grouped-prompt-detailed-window {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+.detailed-window-header {
+  background: #0f0f0f !important;
+  border-bottom: 1px solid #2c2c2c !important;
+  border-radius: 8px 8px 0 0 !important;
+  cursor: move !important;
+}
+
+.detailed-window-title {
+  color: #fff !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  margin: 0 !important;
+  user-select: none !important;
+}
+
+.detailed-window-content {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  padding: 16px !important;
+  scrollbar-width: thin !important;
+  scrollbar-color: #2c2c2c #1b1b1b !important;
+}
+
+.detailed-window-content::-webkit-scrollbar {
+  width: 6px !important;
+}
+
+.detailed-window-content::-webkit-scrollbar-track {
+  background: #1b1b1b !important;
+}
+
+.detailed-window-content::-webkit-scrollbar-thumb {
+  background-color: #2c2c2c !important;
+  border-radius: 3px !important;
+}
+
+/* Section styles */
+.name-section,
+.weight-section,
+.random-count-section,
+.status-section {
+  margin-bottom: 16px !important;
+}
+
+.name-section label,
+.weight-section label,
+.random-count-section label,
+.status-section label {
+  display: block !important;
+  color: #999 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  margin-bottom: 4px !important;
+  text-transform: uppercase !important;
+}
+
+.name-section input,
+.weight-section input,
+.random-count-section input {
+  width: 100% !important;
+  background: #232323 !important;
+  border: 1px solid #2c2c2c !important;
+  border-radius: 6px !important;
+  padding: 8px !important;
+  color: #ccc !important;
+  font-size: 12px !important;
+  box-sizing: border-box !important;
+}
+
+.name-section input:focus,
+.weight-section input:focus,
+.random-count-section input:focus {
+  border-color: #8b5cf6 !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.25) !important;
+}
+
+/* Status button styles */
+.status-section button {
+  padding: 6px 12px !important;
+  border: 1px solid #2c2c2c !important;
+  border-radius: 4px !important;
+  background: #232323 !important;
+  color: #999 !important;
+  font-size: 11px !important;
+  cursor: pointer !important;
+  transition: all 0.2s !important;
+}
+
+.status-section button.active {
+  background: #8b5cf6 !important;
+  color: white !important;
+}
+
+.status-section button:hover {
+  background: #2a2a2a !important;
+  border-color: #363636 !important;
+  color: #ccc !important;
+}
+
+/* Floating window styles */
+.grouped-prompt-floating-window {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .grouped-prompt-container {
+    padding: 4px !important;
+  }
+
+  .grouped-prompt-header {
+    flex-direction: column !important;
+    gap: 4px !important;
+  }
+
+  .prompt-group-item,
+  .prompt-tag-item,
+  .prompt-subgroup-item {
+    flex-direction: column !important;
+    gap: 4px !important;
+  }
+}

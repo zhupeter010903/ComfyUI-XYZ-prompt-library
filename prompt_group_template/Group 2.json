@@ -1,0 +1,16 @@
+{
+  "name": "Group 2",
+  "enabled": true,
+  "weight": "1",
+  "random_count": "0",
+  "status": "default",
+  "items": [
+    {
+      "type": "prompt_tag",
+      "text": "111",
+      "enabled": true,
+      "weight": "0.2",
+      "random_candidate": true
+    }
+  ]
+}

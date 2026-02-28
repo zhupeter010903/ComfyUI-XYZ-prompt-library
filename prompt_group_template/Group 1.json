@@ -1,0 +1,56 @@
+{
+  "name": "Group 1",
+  "enabled": true,
+  "weight": "1",
+  "random_count": "0",
+  "status": "default",
+  "items": [
+    {
+      "type": "prompt_tag",
+      "text": "t1",
+      "enabled": true,
+      "weight": "1",
+      "random_candidate": false
+    },
+    {
+      "type": "prompt_subgroup",
+      "name": "s1",
+      "enabled": false,
+      "weight": "1",
+      "random_candidate": false,
+      "items": [],
+      "_expanded": true
+    },
+    {
+      "type": "prompt_subgroup",
+      "name": "s2",
+      "enabled": true,
+      "weight": "1",
+      "random_candidate": true,
+      "items": [
+        {
+          "type": "prompt_tag",
+          "text": "t2",
+          "enabled": true,
+          "weight": "1",
+          "random_candidate": true
+        }
+      ],
+      "_expanded": true
+    },
+    {
+      "type": "prompt_tag",
+      "text": "New prompt",
+      "enabled": true,
+      "weight": "1",
+      "random_candidate": false
+    },
+    {
+      "type": "prompt_tag",
+      "text": "New prompt",
+      "enabled": true,
+      "weight": "1",
+      "random_candidate": false
+    }
+  ]
+}
