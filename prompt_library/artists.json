@@ -5,7 +5,7 @@
   "shuffle": false,
   "weight": "1",
   "random": "",
-  "prefix": "",
+  "prefix": "artist:",
   "tags": [
     "artist"
   ],
@@ -15,204 +15,252 @@
       "active": true,
       "shuffle": true,
       "weight": "1",
-      "random": "20",
+      "random": "10-20",
       "prompts": [
         {
-          "context": "ciloranko",
+          "context": "dk.senie",
           "active": true,
           "order_index": 1,
           "weight": "1"
         },
         {
-          "context": "nigiri",
+          "context": "stmast",
           "active": true,
           "order_index": 2,
           "weight": "1"
         },
         {
-          "context": "stmast",
+          "context": "qingmingtongzi",
           "active": true,
           "order_index": 3,
           "weight": "1"
         },
         {
-          "context": "omone hokoma agm",
+          "context": "ciloranko",
           "active": true,
           "order_index": 4,
           "weight": "1"
         },
         {
-          "context": "qiandaiyiyu",
+          "context": "omone hokoma agm",
           "active": true,
           "order_index": 5,
           "weight": "1"
         },
         {
-          "context": "rourou \\(been\\)",
+          "context": "qiandaiyiyu",
           "active": true,
           "order_index": 6,
           "weight": "1"
         },
         {
-          "context": "yd \\(orange maru\\)",
+          "context": "rourou \\(been\\)",
           "active": true,
           "order_index": 7,
           "weight": "1"
         },
         {
-          "context": "toyoman",
+          "context": "yd \\(orange maru\\)",
           "active": true,
           "order_index": 8,
           "weight": "1"
         },
         {
-          "context": "gdhs",
+          "context": "toyoman",
           "active": true,
           "order_index": 9,
           "weight": "1"
         },
         {
-          "context": "gorgeous mushroom",
+          "context": "gdhs",
           "active": true,
           "order_index": 10,
           "weight": "1"
         },
         {
-          "context": "maccha_\\(mochancc\\)",
+          "context": "gorgeous mushroom",
           "active": true,
           "order_index": 11,
           "weight": "1"
         },
         {
-          "context": "rafaelaaa",
+          "context": "maccha_\\(mochancc\\)",
           "active": true,
           "order_index": 12,
           "weight": "1"
         },
         {
-          "context": "lrrer",
+          "context": "rafaelaaa",
           "active": true,
           "order_index": 13,
           "weight": "1"
         },
         {
-          "context": "feint721",
+          "context": "lrrer",
           "active": true,
           "order_index": 14,
           "weight": "1"
         },
         {
-          "context": "ohisashiburi",
+          "context": "feint721",
           "active": true,
           "order_index": 15,
           "weight": "1"
         },
         {
-          "context": "meion",
+          "context": "ohisashiburi",
           "active": true,
           "order_index": 16,
           "weight": "1"
         },
         {
-          "context": "onedoo",
+          "context": "meion",
           "active": true,
           "order_index": 17,
           "weight": "1"
         },
         {
-          "context": "qingmingtongzi",
+          "context": "onedoo",
           "active": true,
           "order_index": 18,
           "weight": "1"
         },
         {
-          "context": "iuui",
+          "context": "rity",
           "active": true,
           "order_index": 19,
           "weight": "1"
         },
         {
-          "context": "rity",
+          "context": "hiiragi_yuuichi",
           "active": true,
           "order_index": 20,
           "weight": "1"
         },
         {
-          "context": "hiiragi_yuuichi",
+          "context": "lpip",
           "active": true,
           "order_index": 21,
           "weight": "1"
         },
         {
-          "context": "lpip",
+          "context": "jima",
           "active": true,
           "order_index": 22,
           "weight": "1"
         },
         {
-          "context": "jima",
+          "context": "liduke",
           "active": true,
           "order_index": 23,
           "weight": "1"
         },
         {
-          "context": "liduke",
+          "context": "iumu",
           "active": true,
           "order_index": 24,
           "weight": "1"
         },
         {
-          "context": "iumu",
+          "context": "moemoepiano",
           "active": true,
           "order_index": 25,
           "weight": "1"
         },
         {
-          "context": "moemoepiano",
+          "context": "ningen_mame",
           "active": true,
           "order_index": 26,
           "weight": "1"
         },
         {
-          "context": "ningen_mame",
+          "context": "starshadowmagician",
           "active": true,
           "order_index": 27,
           "weight": "1"
         },
         {
-          "context": "starshadowmagician",
+          "context": "starblame",
           "active": true,
           "order_index": 28,
           "weight": "1"
         },
         {
-          "context": "starblame",
+          "context": "yyb",
           "active": true,
           "order_index": 29,
           "weight": "1"
         },
         {
-          "context": "yyb",
+          "context": "halcon",
           "active": true,
           "order_index": 30,
           "weight": "1"
         },
         {
-          "context": "halcon",
+          "context": "ulrich \\(tagaragakuin\\)",
           "active": true,
           "order_index": 31,
           "weight": "1"
         },
         {
-          "context": "ulrich \\(tagaragakuin\\)",
+          "context": "ask_\\(askzy\\)",
           "active": true,
           "order_index": 32,
           "weight": "1"
         },
         {
-          "context": "ask_\\(askzy\\)",
+          "context": "nigiri",
           "active": true,
           "order_index": 33,
+          "weight": "1"
+        },
+        {
+          "context": "gandy \\(gan3e46\\)",
+          "active": true,
+          "order_index": 34,
+          "weight": "1"
+        },
+        {
+          "context": "neropaso",
+          "active": true,
+          "order_index": 35,
+          "weight": "1"
+        },
+        {
+          "context": "takamine_nadare",
+          "active": true,
+          "order_index": 36,
+          "weight": "1"
+        },
+        {
+          "context": "toosaka_asagi",
+          "active": true,
+          "order_index": 37,
+          "weight": "1"
+        },
+        {
+          "context": "takeshima_eku",
+          "active": true,
+          "order_index": 38,
+          "weight": "1"
+        },
+        {
+          "context": "teddypocky",
+          "active": true,
+          "order_index": 39,
+          "weight": "1"
+        },
+        {
+          "context": "sooon",
+          "active": true,
+          "order_index": 40,
+          "weight": "1"
+        },
+        {
+          "context": "ying yi",
+          "active": true,
+          "order_index": 41,
           "weight": "1"
         },
         {
@@ -271,12 +319,6 @@
         },
         {
           "context": "dishwasher1910",
-          "active": false,
-          "order_index": null,
-          "weight": "1"
-        },
-        {
-          "context": "dk.senie",
           "active": false,
           "order_index": null,
           "weight": "1"
@@ -373,6 +415,12 @@
         },
         {
           "context": "inu \\(aerodog\\)",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "iuui",
           "active": false,
           "order_index": null,
           "weight": "1"
@@ -511,12 +559,6 @@
         },
         {
           "context": "nanahara_fuyuki",
-          "active": false,
-          "order_index": null,
-          "weight": "1"
-        },
-        {
-          "context": "neropaso",
           "active": false,
           "order_index": null,
           "weight": "1"
@@ -690,19 +732,13 @@
           "weight": "1"
         },
         {
-          "context": "takeshima_eku",
+          "context": "takada kazuhiro",
           "active": false,
           "order_index": null,
           "weight": "1"
         },
         {
           "context": "tatami_to_hinoki",
-          "active": false,
-          "order_index": null,
-          "weight": "1"
-        },
-        {
-          "context": "teddypocky",
           "active": false,
           "order_index": null,
           "weight": "1"
@@ -785,7 +821,7 @@
     },
     {
       "name": "machine",
-      "active": true,
+      "active": false,
       "shuffle": true,
       "weight": "1",
       "random": "",
@@ -928,7 +964,7 @@
     },
     {
       "name": "latex",
-      "active": true,
+      "active": false,
       "shuffle": false,
       "weight": "1",
       "random": "",
@@ -957,7 +993,7 @@
     },
     {
       "name": "bondage",
-      "active": true,
+      "active": false,
       "shuffle": false,
       "weight": "1",
       "random": "",
@@ -1004,7 +1040,7 @@
     },
     {
       "name": "default2",
-      "active": true,
+      "active": false,
       "shuffle": false,
       "weight": "1",
       "random": "",
@@ -1153,7 +1189,7 @@
     },
     {
       "name": "jima-iumu",
-      "active": true,
+      "active": false,
       "shuffle": false,
       "weight": "1",
       "random": "",
@@ -1282,7 +1318,7 @@
     "optional1": true,
     "default": true,
     "Group 3": true,
-    "machine": false,
+    "machine": true,
     "Group 4": true,
     "latex": false,
     "bondage": false,
@@ -1291,8 +1327,9 @@
     "base_pvc": true,
     "default2": false,
     "Group 6": true,
-    "jima-iumu": false
+    "jima-iumu": false,
+    "gbf": true
   },
   "createDate": "2025-08-30T02:41:44.420Z",
-  "lastEdit": "2026-02-26T04:50:39.535Z"
+  "lastEdit": "2026-03-21T11:30:15.867Z"
 }

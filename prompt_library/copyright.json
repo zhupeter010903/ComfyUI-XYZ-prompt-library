@@ -8,74 +8,263 @@
   "tags": [],
   "groups": [
     {
-      "name": "mecha",
+      "name": "default",
       "active": true,
-      "shuffle": false,
+      "shuffle": true,
       "weight": "1",
-      "random": "3",
+      "random": "",
       "prompts": [
         {
-          "context": "copyright:azur lane",
+          "context": "blue archive",
           "active": true,
           "order_index": 1,
           "weight": "1"
         },
         {
-          "context": "copyright:blue archive",
+          "context": "granblue fantasy",
           "active": true,
           "order_index": 2,
           "weight": "1"
         },
         {
-          "context": "copyright:kouyoku_senki_exs-tia",
+          "context": "goddess_of_victory:_nikke",
           "active": true,
           "order_index": 3,
           "weight": "1"
         },
         {
-          "context": "copyright:master of eternity",
-          "active": true,
-          "order_index": 4,
+          "context": "arknights",
+          "active": false,
+          "order_index": null,
           "weight": "1"
         },
         {
-          "context": "goddess_of_victory:_nikke",
-          "active": true,
-          "order_index": 5,
+          "context": "azur lane",
+          "active": false,
+          "order_index": null,
           "weight": "1"
         },
         {
           "context": "brown_dust_(series)",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "fate/grand order",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "fire emblem",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "genshin impact",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "honkai (series)",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "honkai \\(series\\)",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "honkai impact 3rd",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "honkai: star rail",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "jinki",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "kouyoku_senki_exs-tia",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "master of eternity",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "shadowverse",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "shingeki no bahamut",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "wuthering waves",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    },
+    {
+      "name": "gbf",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "shadowverse",
           "active": true,
-          "order_index": 6,
+          "order_index": 1,
           "weight": "1"
         },
         {
-          "context": "",
+          "context": "granblue fantasy",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "fire emblem",
           "active": false,
           "order_index": null,
           "weight": "1"
         },
         {
-          "context": "copyright:blue  archive",
+          "context": "shingeki no bahamut",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    },
+    {
+      "name": "fate",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "fate \\(series\\)",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "fate/grand order",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "fate/hollow ataraxia",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "fate/apocrypha",
           "active": false,
           "order_index": null,
           "weight": "1"
         },
         {
-          "context": "copyright:crossover",
+          "context": "fate/extra",
           "active": false,
           "order_index": null,
           "weight": "1"
         },
         {
-          "context": "copyright:daraku gear",
+          "context": "fate/extra ccc",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "fate/kaleid liner prisma illya",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "fate/stay night",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "fate/zero",
           "active": false,
           "order_index": null,
           "weight": "1"
         }
       ],
       "displayMode": "simple",
+      "prefix": ""
+    },
+    {
+      "name": "ba",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "azur lane",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "blue archive",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "princess connect!",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "stella sora",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
       "prefix": ""
     }
   ],
@@ -90,9 +279,17 @@
     "base2": true,
     "optional1": true,
     "lighting": true,
-    "base_pvc": true
+    "base_pvc": true,
+    "Group 2": true,
+    "gbf": false,
+    "Group 3": true,
+    "fate": false,
+    "Group 6": true,
+    "ba": false,
+    "anima": true,
+    "loli": true
   },
   "createDate": "2025-09-01T22:03:30.003Z",
-  "lastEdit": "2026-02-08T17:21:32.689Z",
-  "prefix": ""
+  "lastEdit": "2026-04-14T11:55:18.576Z",
+  "prefix": "copyrights:"
 }

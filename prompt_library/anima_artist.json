@@ -1,0 +1,342 @@
+{
+  "id": "entry_1773742961889_uoukid5bs",
+  "name": "anima_artist",
+  "active": true,
+  "shuffle": false,
+  "weight": "1",
+  "random": "",
+  "tags": [
+    "artist"
+  ],
+  "groups": [
+    {
+      "name": "default",
+      "active": true,
+      "shuffle": true,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "yd \\(orange maru\\)",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "ohisashiburi",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "lpip",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "feint721",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "rity",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "atdan",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "nigiri",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "qiandaiyiyu",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "iuui",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "liduke",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "omone hokoma agm",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "starshadowmagician",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "fuzichoco",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "iumu",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "jima",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "mignon",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "ningen mame",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "rourou_\\(been\\)",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    },
+    {
+      "name": "machine",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "ginklaga",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "dk.senie",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "iuui",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "asdkd123",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "inoino",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "ringobatake",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "yusha_m",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "mytea_\\(soso\\)",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "stmast",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "l_axe",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "shizuoxing_kof",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "tsunashima_shirou",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "nakamura_rohane",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    },
+    {
+      "name": "loli",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "lpip",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "fuzichoco",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "jima",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "mignon",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "touchuu_kasou",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "nigiri",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "rurudo",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "rourou_\\(been\\)",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "atdan",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "feint721",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "liduke",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "ohisashiburi",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "omone hokoma agm",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "rity",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "starshadowmagician",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "yd \\(orange maru\\)",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    }
+  ],
+  "expansionStates": {
+    "default": true,
+    "Group 1": true,
+    "machine": false,
+    "Group 2": true,
+    "gbf": true,
+    "anima": true,
+    "ba": true,
+    "Group 3": true,
+    "loli": true
+  },
+  "createDate": "2026-03-17T10:22:41.889Z",
+  "lastEdit": "2026-04-14T13:27:01.050Z",
+  "prefix": "@"
+}

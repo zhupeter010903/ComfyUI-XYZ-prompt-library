@@ -224,6 +224,113 @@
       "prefix": ""
     },
     {
+      "name": "anima",
+      "active": true,
+      "shuffle": false,
+      "weight": "1",
+      "random": "",
+      "prompts": [
+        {
+          "context": "masterpiece",
+          "active": true,
+          "order_index": 1,
+          "weight": "1"
+        },
+        {
+          "context": "best quality",
+          "active": true,
+          "order_index": 2,
+          "weight": "1"
+        },
+        {
+          "context": "amazing quality",
+          "active": true,
+          "order_index": 3,
+          "weight": "1"
+        },
+        {
+          "context": "very aesthetic",
+          "active": true,
+          "order_index": 4,
+          "weight": "1"
+        },
+        {
+          "context": "very awa",
+          "active": true,
+          "order_index": 5,
+          "weight": "1"
+        },
+        {
+          "context": "absurdres",
+          "active": true,
+          "order_index": 6,
+          "weight": "1"
+        },
+        {
+          "context": "newest",
+          "active": true,
+          "order_index": 7,
+          "weight": "1"
+        },
+        {
+          "context": "ultra-detailed",
+          "active": true,
+          "order_index": 8,
+          "weight": "1"
+        },
+        {
+          "context": "beautiful detailed",
+          "active": true,
+          "order_index": 9,
+          "weight": "1"
+        },
+        {
+          "context": "finely detailed",
+          "active": true,
+          "order_index": 10,
+          "weight": "1"
+        },
+        {
+          "context": "perfect face",
+          "active": true,
+          "order_index": 11,
+          "weight": "1"
+        },
+        {
+          "context": "highres",
+          "active": true,
+          "order_index": 12,
+          "weight": "1"
+        },
+        {
+          "context": "16K",
+          "active": true,
+          "order_index": 13,
+          "weight": "1"
+        },
+        {
+          "context": "year 2025",
+          "active": true,
+          "order_index": 14,
+          "weight": "1"
+        },
+        {
+          "context": "official art",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        },
+        {
+          "context": "wallpaper",
+          "active": false,
+          "order_index": null,
+          "weight": "1"
+        }
+      ],
+      "displayMode": "side-by-side",
+      "prefix": ""
+    },
+    {
       "name": "optional1",
       "active": false,
       "shuffle": false,
@@ -504,14 +611,18 @@
     "Group 4": true,
     "Group 5": true,
     "Group 6": true,
-    "optional1": true,
-    "base2": true,
-    "base1": true,
+    "optional1": false,
+    "base2": false,
+    "base1": false,
     "default": true,
-    "base_pvc": true,
-    "lighting": true
+    "base_pvc": false,
+    "lighting": false,
+    "ba": true,
+    "anima": true,
+    "machine": true,
+    "loli": true
   },
   "createDate": "2025-08-30T03:17:06.983Z",
-  "lastEdit": "2025-10-04T09:30:10.085Z",
+  "lastEdit": "2026-04-13T01:58:25.224Z",
   "prefix": ""
 }
