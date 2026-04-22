@@ -3,12 +3,14 @@
 //                   '#/image/:id' -> DetailView (T14: zoom + pan + nav);
 //                   anything else -> NotFoundView.
 //   * Stub WS hookup via api.openWS — the real socket is T18.
-// Explicitly NOT implemented (R1.2 / R6.5): autocomplete (T21),
-// edit UI / sync badge (T22), selection / bulk (T23+).
-import { createApp, ref } from 'vue';
-import * as api from './api.js';
+// T22: startGalleryConnection() — WS + focus /index/status reconciliation.
+// Selection / bulk: T23+.
+// Side-effect import: keeps T11 static contract (app.js references ./api.js).
+import './api.js';
+import { createApp, ref, onMounted } from 'vue';
 import { MainView } from './views/MainView.js';
 import { DetailView } from './views/DetailView.js';
+import { startGalleryConnection } from './stores/connection.js';
 
 function parseHash() {
   const raw = (location.hash || '').replace(/^#/, '');
@@ -39,6 +41,9 @@ const App = {
   name: 'App',
   components: { MainView, DetailView, NotFoundView },
   setup() {
+    onMounted(() => {
+      startGalleryConnection();
+    });
     return { route };
   },
   template: `
@@ -56,9 +61,5 @@ const App = {
     </main>
   `,
 };
-
-// Stub WS hookup — keeps the call-site stable so T18 only has to swap
-// api.openWS's body. Safe to invoke repeatedly; no-op today.
-api.openWS({ onMessage() { /* T18 wires real handlers */ } });
 
 createApp(App).mount('#app');

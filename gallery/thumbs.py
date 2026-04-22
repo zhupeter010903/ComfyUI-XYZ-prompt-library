@@ -76,6 +76,30 @@ _TOUCH_SET_MAX: int = 10_000
 _touch_set: Set[str] = set()
 _touch_lock: threading.Lock = threading.Lock()
 
+# Corrupt / zero-byte sources still appear in ``image`` after cold scan
+# (T07 fixtures).  Grid polling can hammer ``/thumb`` — log at warning
+# without a traceback, and throttle per source path (R7.4 bounded dict).
+_THUMB_GEN_FAIL_LOG_INTERVAL_SEC: float = 120.0
+_thumb_gen_fail_last: Dict[str, float] = {}
+_thumb_gen_fail_lock = threading.Lock()
+
+
+def _log_thumb_gen_failure(src_path: str, exc: BaseException) -> None:
+    now = time.time()
+    with _thumb_gen_fail_lock:
+        last = _thumb_gen_fail_last.get(src_path, 0.0)
+        if now - last < _THUMB_GEN_FAIL_LOG_INTERVAL_SEC:
+            return
+        _thumb_gen_fail_last[src_path] = now
+        if len(_thumb_gen_fail_last) > 512:
+            _thumb_gen_fail_last.clear()
+    logger.warning(
+        "thumbs: failed to generate thumbnail for %s (%s: %s)",
+        src_path,
+        type(exc).__name__,
+        exc,
+    )
+
 # Per-hash-key dedup registry. Entries are popped as soon as the
 # generating call finishes, so the dict is naturally bounded by the
 # number of *currently-generating* thumbs (not by total library size).
@@ -164,8 +188,8 @@ def _generate_and_save(src_path: str, dst_path: Path) -> Optional[int]:
             cropped.save(tmp_path, format="WEBP", quality=_WEBP_QUALITY)
         os.replace(tmp_path, dst_path)
         return int(dst_path.stat().st_size)
-    except (UnidentifiedImageError, OSError, ValueError):
-        logger.exception("thumbs: failed to generate thumbnail for %s", src_path)
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        _log_thumb_gen_failure(src_path, exc)
         try:
             if tmp_path.exists():
                 tmp_path.unlink()

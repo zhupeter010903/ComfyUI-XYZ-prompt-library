@@ -20,12 +20,17 @@
 //   * Real bulk selection / checkbox overlay (T23).
 //   * Real favorite PATCH (T19); we keep an optimistic local flip and
 //     emit intent that T19 will convert into an api.patch(/image/:id).
-//   * Timeline (FR-9c), autocomplete vocab, Move/Delete modals.
-//   * Focus reconciliation on window.onfocus (T22).
+//   * Timeline (FR-9c), Move/Delete modals.
+//   * T21: Autocomplete for prompt/tag filters + /vocab/models for model list.
+//   * T22: api.patch + WS (stores/connection.js) + /index/status focus
+//     reconciliation.
 import { defineComponent, ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import * as api from '../api.js';
+import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 import { FolderTree } from '../components/FolderTree.js';
 import { VirtualGrid } from '../components/VirtualGrid.js';
+import { Autocomplete } from '../components/Autocomplete.js';
+import { ModelFilterPick } from '../components/ModelFilterPick.js';
 import {
   filterState, panelCollapsed, setPanelCollapsed,
   apiQueryObject, resetFilter,
@@ -58,7 +63,7 @@ function _readPendingRestore() {
 
 export const MainView = defineComponent({
   name: 'MainView',
-  components: { FolderTree, VirtualGrid },
+  components: { FolderTree, VirtualGrid, Autocomplete, ModelFilterPick },
   setup() {
     const folders = ref([]);
     const foldersLoading = ref(true);
@@ -83,6 +88,8 @@ export const MainView = defineComponent({
 
     let nameTimer = null;
     let pendingAborter = null;
+    let unsubEvent = null;
+    let unsubRecon = null;
     // Monotonic token so a late-returning abort doesn't resurrect an
     // obsolete page (e.g. user changes sort while page-1 is mid-flight).
     let fetchToken = 0;
@@ -107,13 +114,29 @@ export const MainView = defineComponent({
       }
     }
 
-    function _mergeKnownModels(newItems) {
-      const merged = new Set(knownModels.value);
-      for (const it of newItems) {
-        const m = it && it.metadata && it.metadata.model;
-        if (m) merged.add(m);
+    async function fetchVocabModels() {
+      try {
+        const arr = await api.get('/vocab/models');
+        if (!Array.isArray(arr)) {
+          knownModels.value = [];
+          return;
+        }
+        knownModels.value = arr.map((row) => {
+          if (row && typeof row === 'object' && row.model != null) {
+            return {
+              model: String(row.model),
+              label: row.label != null ? String(row.label) : String(row.model),
+              usage_count: Number(row.usage_count) || 0,
+            };
+          }
+          if (typeof row === 'string') {
+            return { model: row, label: row, usage_count: 0 };
+          }
+          return null;
+        }).filter(Boolean);
+      } catch {
+        knownModels.value = [];
       }
-      knownModels.value = [...merged].sort((a, b) => a.localeCompare(b));
     }
 
     async function resetAndFetch() {
@@ -142,7 +165,6 @@ export const MainView = defineComponent({
         hasMore.value = !!page.next_cursor;
         totalCount.value = typeof count.total === 'number' ? count.total : 0;
         approximate.value = !!count.approximate;
-        _mergeKnownModels(items);
       } catch (e) {
         if (e && e.name === 'AbortError') return;
         if (token !== fetchToken) return;
@@ -167,7 +189,6 @@ export const MainView = defineComponent({
         images.value = images.value.concat(items);
         nextCursor.value = page.next_cursor || null;
         hasMore.value = !!page.next_cursor;
-        _mergeKnownModels(items);
       } catch (e) {
         if (token !== fetchToken) return;
         imagesError.value = e;
@@ -179,14 +200,50 @@ export const MainView = defineComponent({
 
     onMounted(() => {
       fetchFolders();
+      fetchVocabModels();
       resetAndFetch();
       window.addEventListener('click', closeContextMenu);
       window.addEventListener('scroll', closeContextMenu, true);
+
+      unsubRecon = subscribeReconcile(() => { resetAndFetch(); });
+      unsubEvent = subscribeGalleryEvent((env) => {
+        const t = env && env.type;
+        const d = (env && env.data) || {};
+        if (t === EV.UPSERTED || t === EV.DELETED || t === EV.DRIFT) {
+          resetAndFetch();
+          return;
+        }
+        if (t === EV.INDEX_PROGRESS) {
+          return;
+        }
+        if (t === EV.UPDATED && typeof d.id === 'number') {
+          const idx = images.value.findIndex((x) => x && x.id === d.id);
+          if (idx < 0) return;
+          const it = images.value[idx];
+          const g = { ...(it.gallery || {}) };
+          if (d.version != null) g.version = d.version;
+          if (d.favorite !== undefined) g.favorite = !!d.favorite;
+          if (Array.isArray(d.tags)) g.tags = d.tags.slice();
+          images.value.splice(idx, 1, { ...it, gallery: g });
+          return;
+        }
+        if (t === EV.SYNC && typeof d.id === 'number') {
+          const idx = images.value.findIndex((x) => x && x.id === d.id);
+          if (idx < 0) return;
+          const it = images.value[idx];
+          const g = { ...(it.gallery || {}), ...it.gallery };
+          if (d.sync_status != null) g.sync_status = d.sync_status;
+          if (d.version != null) g.version = d.version;
+          images.value.splice(idx, 1, { ...it, gallery: g });
+        }
+      });
     });
 
     onBeforeUnmount(() => {
       if (pendingAborter) pendingAborter.abort();
       if (nameTimer) clearTimeout(nameTimer);
+      if (unsubEvent) { unsubEvent(); unsubEvent = null; }
+      if (unsubRecon) { unsubRecon(); unsubRecon = null; }
       window.removeEventListener('click', closeContextMenu);
       window.removeEventListener('scroll', closeContextMenu, true);
     });
@@ -214,6 +271,13 @@ export const MainView = defineComponent({
     function commitTagTokens() {
       filterState.filter.tag_tokens = tagInput.value
         .split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    function setPromptInput(v) {
+      promptInput.value = v;
+    }
+    function setTagInput(v) {
+      tagInput.value = v;
     }
 
     function onToggleDateBound(which, enabled) {
@@ -316,19 +380,24 @@ export const MainView = defineComponent({
     }
     watch(() => images.value.length, _tryRestoreScroll);
 
-    // Optimistic local favorite flip — T19 will replace this stub with
-    // an api.patch(`/image/${id}`, { favorite }) that rolls back on
-    // error. Keeping the shape (find by id, mutate `gallery.favorite`)
-    // means T19 only swaps the IO, not the event plumbing.
-    function onToggleFavorite(id) {
-      const idx = images.value.findIndex(x => x && x.id === id);
+    async function onToggleFavorite(id) {
+      if (typeof id !== 'number') return;
+      const idx = images.value.findIndex((x) => x && x.id === id);
       if (idx < 0) return;
       const it = images.value[idx];
       const cur = !!(it.gallery && it.gallery.favorite);
+      const next = !cur;
+      const prev = { ...it, gallery: { ...(it.gallery || {}) } };
       images.value.splice(idx, 1, {
         ...it,
-        gallery: { ...(it.gallery || {}), favorite: !cur },
+        gallery: { ...(it.gallery || {}), favorite: next, sync_status: 'pending' },
       });
+      try {
+        const updated = await api.patch(`/image/${id}`, { favorite: next });
+        images.value.splice(idx, 1, updated);
+      } catch (e) {
+        images.value.splice(idx, 1, prev);
+      }
     }
 
     function onContext({ id, x, y }) {
@@ -354,7 +423,7 @@ export const MainView = defineComponent({
       hasDateAfter, hasDateBefore,
       contextMenu, SORT_OPTIONS, sortValue,
       lastOpenedId,
-      onNameInput, commitPromptTokens, commitTagTokens,
+      onNameInput, commitPromptTokens, commitTagTokens, setPromptInput, setTagInput,
       onToggleDateBound, onSelectFolder, onToggleRecursive,
       toggleCollapse, onResetClick,
       onCardsPerRowInput,
@@ -387,19 +456,19 @@ export const MainView = defineComponent({
             </label>
             <label class="mv-field">
               <span>positive prompt filter:</span>
-              <input type="text"
-                     v-model="promptInput"
-                     @blur="commitPromptTokens"
-                     @keyup.enter="commitPromptTokens"
-                     placeholder="comma-separated tokens" />
+              <Autocomplete fetch-kind="prompts"
+                            placeholder="comma-separated tokens (T21 autocomplete)"
+                            :model-value="promptInput"
+                            @update:model-value="setPromptInput"
+                            @commit="commitPromptTokens" />
             </label>
             <label class="mv-field">
               <span>tag filter:</span>
-              <input type="text"
-                     v-model="tagInput"
-                     @blur="commitTagTokens"
-                     @keyup.enter="commitTagTokens"
-                     placeholder="comma-separated tags" />
+              <Autocomplete fetch-kind="tags"
+                            placeholder="comma-separated tags (T21 autocomplete)"
+                            :model-value="tagInput"
+                            @update:model-value="setTagInput"
+                            @commit="commitTagTokens" />
             </label>
             <label class="mv-field">
               <span>favorite filter:</span>
@@ -411,10 +480,9 @@ export const MainView = defineComponent({
             </label>
             <label class="mv-field">
               <span>model filter:</span>
-              <select v-model="filter.model">
-                <option value="">all</option>
-                <option v-for="m in knownModels" :key="m" :value="m">{{ m }}</option>
-              </select>
+              <ModelFilterPick v-model="filter.model"
+                               :options="knownModels"
+                               :disabled="panelCollapsed.filters" />
             </label>
             <fieldset class="mv-field mv-date">
               <legend>date filter:</legend>

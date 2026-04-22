@@ -10,8 +10,9 @@ Scope:
     alongside its neighbours).  ``enqueue_write(priority, op) -> Future``
     is the sole public write API.
   * **Op classes**: ``UpsertImageOp`` (T07), ``EnsureFolderOp`` (T05),
-    ``InsertThumbCacheOp`` (T08), placeholders ``UpdateImagePathOp``
-    (T24) / ``DeleteImageOp`` (T19/T25).
+    ``InsertThumbCacheOp`` (T08), ``SetSyncStatusOp`` / ``SetSyncFailedOp`` /
+    ``SetSyncHardFailedOp`` (T17), ``DeleteImageOp`` (T20+), placeholder
+    ``UpdateImagePathOp`` (T24).
   * **Read side (T09)**: ``get_image`` / ``list_images`` (cursor-paged,
     filtered) / ``folder_tree`` / ``neighbors``.  All read APIs open a
     short-lived ``db.connect_read`` connection (WAL → multi-reader);
@@ -19,8 +20,8 @@ Scope:
 
 Out of scope (deferred):
   * Selection resolution                           — T23
-  * ``UpdateImageOp`` / real ``DeleteImageOp``     — T19 / T24 / T25
-  * ``tag`` / ``image_tag`` / FTS5 schema + queries — T15 / T28
+  * ``UpdateImagePathOp`` (bulk path update)         — T24
+  * FTS5 ``image_fts`` + search queries             — T28
 """
 
 from __future__ import annotations
@@ -36,9 +37,10 @@ import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import db as _db
+from . import vocab as _vocab
 
 logger = logging.getLogger("xyz.gallery.repo")
 
@@ -48,10 +50,16 @@ __all__ = [
     "LOW",
     "WriteQueue",
     "UpsertImageOp",
+    "UpsertVocabAndLinksOp",
+    "UpdateImageOp",
+    "ResyncMetadataOp",
     "UpdateImagePathOp",
     "DeleteImageOp",
     "EnsureFolderOp",
     "InsertThumbCacheOp",
+    "SetSyncStatusOp",
+    "SetSyncFailedOp",
+    "SetSyncHardFailedOp",
     # T09 read-side DTOs + API
     "FilterSpec",
     "SortSpec",
@@ -66,6 +74,12 @@ __all__ = [
     "list_images",
     "folder_tree",
     "neighbors",
+    # T21 vocab read helpers
+    "vocab_lookup",
+    "list_models_for_vocab",
+    "model_vocab_label",
+    "VOCAB_LOOKUP_DEFAULT_LIMIT",
+    "VOCAB_LOOKUP_MAX_LIMIT",
 ]
 
 
@@ -138,7 +152,9 @@ class UpsertImageOp:
                  workflow_present: int,
                  favorite: Optional[int],
                  tags_csv: Optional[str],
-                 indexed_at: int):
+                 indexed_at: int,
+                 prompt_tokens: Optional[List[str]] = None,
+                 normalized_tags: Optional[List[str]] = None):
         self.path = path
         self.folder_id = folder_id
         self.root_path = root_path
@@ -163,6 +179,8 @@ class UpsertImageOp:
         self.favorite = favorite
         self.tags_csv = tags_csv
         self.indexed_at = int(indexed_at)
+        self.prompt_tokens = list(prompt_tokens) if prompt_tokens else []
+        self.normalized_tags = list(normalized_tags) if normalized_tags else []
 
     def apply(self, conn: sqlite3.Connection) -> None:
         self._ensure_folder_chain(conn)
@@ -190,6 +208,15 @@ class UpsertImageOp:
             "tags_csv": self.tags_csv,
             "indexed_at": self.indexed_at,
         })
+        row = conn.execute("SELECT id FROM image WHERE path = ?", (self.path,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"upsert left no row for path={self.path!r}")
+        image_id = int(row[0])
+        UpsertVocabAndLinksOp(
+            image_id=image_id,
+            prompt_tokens=self.prompt_tokens,
+            tag_names=self.normalized_tags,
+        ).apply(conn)
 
     def _ensure_folder_chain(self, conn: sqlite3.Connection) -> None:
         # relative_path is the POSIX path relative to root_path, including
@@ -250,7 +277,7 @@ ON CONFLICT(path) DO UPDATE SET
     height           = excluded.height,
     file_size        = excluded.file_size,
     mtime_ns         = excluded.mtime_ns,
-    created_at       = excluded.created_at,
+    created_at       = COALESCE(image.created_at, excluded.created_at),
     positive_prompt  = excluded.positive_prompt,
     negative_prompt  = excluded.negative_prompt,
     model            = excluded.model,
@@ -265,6 +292,199 @@ ON CONFLICT(path) DO UPDATE SET
 """
 
 
+class UpsertVocabAndLinksOp:
+    """Replace ``image_prompt_token`` / ``image_tag`` rows for one image (T15).
+
+    Runs in the same SQLite transaction as ``UpsertImageOp`` — never enqueue
+    this alone while the image row is mid-upsert elsewhere.
+    """
+
+    def __init__(self, *, image_id: int, prompt_tokens: List[str], tag_names: List[str]):
+        self.image_id = int(image_id)
+        self.prompt_tokens = list(prompt_tokens)
+        self.tag_names = list(tag_names)
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        for (tid,) in conn.execute(
+            "SELECT token_id FROM image_prompt_token WHERE image_id = ?",
+            (self.image_id,),
+        ).fetchall():
+            conn.execute(
+                "UPDATE prompt_token SET usage_count = usage_count - 1 "
+                "WHERE id = ? AND usage_count > 0",
+                (int(tid),),
+            )
+        conn.execute(
+            "DELETE FROM image_prompt_token WHERE image_id = ?",
+            (self.image_id,),
+        )
+
+        for (gid,) in conn.execute(
+            "SELECT tag_id FROM image_tag WHERE image_id = ?",
+            (self.image_id,),
+        ).fetchall():
+            conn.execute(
+                "UPDATE tag SET usage_count = usage_count - 1 "
+                "WHERE id = ? AND usage_count > 0",
+                (int(gid),),
+            )
+        conn.execute("DELETE FROM image_tag WHERE image_id = ?", (self.image_id,))
+
+        for tok in self.prompt_tokens:
+            conn.execute(
+                "INSERT OR IGNORE INTO prompt_token(token, usage_count) VALUES (?, 0)",
+                (tok,),
+            )
+            row = conn.execute(
+                "SELECT id FROM prompt_token WHERE token = ? COLLATE NOCASE",
+                (tok,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"prompt_token missing after insert for {tok!r}")
+            pid = int(row[0])
+            conn.execute(
+                "UPDATE prompt_token SET usage_count = usage_count + 1 WHERE id = ?",
+                (pid,),
+            )
+            conn.execute(
+                "INSERT INTO image_prompt_token(image_id, token_id) VALUES (?, ?)",
+                (self.image_id, pid),
+            )
+
+        for name in self.tag_names:
+            conn.execute(
+                "INSERT OR IGNORE INTO tag(name, usage_count) VALUES (?, 0)",
+                (name,),
+            )
+            row = conn.execute(
+                "SELECT id FROM tag WHERE name = ? COLLATE NOCASE",
+                (name,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"tag missing after insert for {name!r}")
+            tid = int(row[0])
+            conn.execute(
+                "UPDATE tag SET usage_count = usage_count + 1 WHERE id = ?",
+                (tid,),
+            )
+            conn.execute(
+                "INSERT INTO image_tag(image_id, tag_id) VALUES (?, ?)",
+                (self.image_id, tid),
+            )
+
+
+class UpdateImageOp:
+    """PATCH user fields on one ``image`` row + bump ``version`` (T19).
+
+    ``favorite`` / ``normalized_tags`` use ``None`` to mean "leave column
+    unchanged".  An empty ``normalized_tags`` list clears ``tags_csv`` and
+    all ``image_tag`` links (prompt-token links are preserved).
+
+    ``apply`` returns the new ``version`` after a successful
+    ``RETURNING`` (WriteQueue propagates this via ``Future.set_result``).
+    """
+
+    def __init__(
+        self,
+        *,
+        image_id: int,
+        favorite: Optional[int] = None,
+        normalized_tags: Optional[List[str]] = None,
+        bump_version: bool = True,
+        refresh_sync: bool = True,
+    ):
+        self.image_id = int(image_id)
+        self.favorite = favorite
+        self.normalized_tags = normalized_tags
+        self.bump_version = bool(bump_version)
+        self.refresh_sync = bool(refresh_sync)
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT id FROM image WHERE id = ?", (self.image_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"image id={self.image_id} not found")
+
+        prompt_tokens: List[str] = []
+        if self.normalized_tags is not None:
+            for (tok,) in conn.execute(
+                "SELECT prompt_token.token FROM image_prompt_token ipt "
+                "INNER JOIN prompt_token ON prompt_token.id = ipt.token_id "
+                "WHERE ipt.image_id = ? ORDER BY ipt.rowid",
+                (self.image_id,),
+            ).fetchall():
+                prompt_tokens.append(str(tok))
+
+        sets: List[str] = []
+        params: List[Any] = []
+
+        if self.favorite is not None:
+            sets.append("favorite = ?")
+            params.append(int(self.favorite))
+
+        if self.normalized_tags is not None:
+            if self.normalized_tags:
+                tags_csv = ",".join(self.normalized_tags)
+            else:
+                tags_csv = None
+            sets.append("tags_csv = ?")
+            params.append(tags_csv)
+
+        if self.refresh_sync:
+            sets.extend(
+                (
+                    "metadata_sync_status = 'pending'",
+                    "metadata_sync_retry_count = 0",
+                    "metadata_sync_next_retry_at = NULL",
+                    "metadata_sync_last_error = NULL",
+                )
+            )
+
+        if self.bump_version:
+            sets.append("version = version + 1")
+
+        if not sets:
+            raise ValueError("UpdateImageOp: nothing to update")
+
+        sql = "UPDATE image SET " + ", ".join(sets) + " WHERE id = ? RETURNING version"
+        params.append(self.image_id)
+        out = conn.execute(sql, params).fetchone()
+        if out is None:
+            raise RuntimeError(f"UPDATE image id={self.image_id} missed RETURNING")
+        new_version = int(out[0])
+
+        if self.normalized_tags is not None:
+            UpsertVocabAndLinksOp(
+                image_id=self.image_id,
+                prompt_tokens=prompt_tokens,
+                tag_names=list(self.normalized_tags),
+            ).apply(conn)
+
+        return new_version
+
+
+class ResyncMetadataOp:
+    """Reset PNG sync retry state without bumping ``version`` (T19 /resync)."""
+
+    def __init__(self, *, image_id: int):
+        self.image_id = int(image_id)
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "UPDATE image SET "
+            "metadata_sync_status = 'pending', "
+            "metadata_sync_retry_count = 0, "
+            "metadata_sync_next_retry_at = NULL, "
+            "metadata_sync_last_error = NULL "
+            "WHERE id = ? RETURNING version",
+            (self.image_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"image id={self.image_id} not found")
+        return int(row[0])
+
+
 class UpdateImagePathOp:
     """Placeholder for T24's bulk-move path update."""
 
@@ -273,10 +493,49 @@ class UpdateImagePathOp:
 
 
 class DeleteImageOp:
-    """Placeholder for T19 / T25's single and bulk delete paths."""
+    """Remove one ``image`` row and dependent vocab + thumb cache rows (T20+).
 
-    def apply(self, conn: sqlite3.Connection) -> None:
-        return None
+    Keyed by POSIX ``path`` as stored in ``image`` (C-1).  Idempotent: if
+    the path is absent, returns ``None``; otherwise the deleted id for WS
+    broadcast.  Does not delete on-disk files — watcher handles FS truth.
+    """
+
+    def __init__(self, *, path: str):
+        self.path = str(path)
+
+    def apply(self, conn: sqlite3.Connection) -> Optional[int]:
+        row = conn.execute(
+            "SELECT id FROM image WHERE path = ?", (self.path,),
+        ).fetchone()
+        if row is None:
+            return None
+        image_id = int(row[0])
+        for (tid,) in conn.execute(
+            "SELECT token_id FROM image_prompt_token WHERE image_id = ?",
+            (image_id,),
+        ).fetchall():
+            conn.execute(
+                "UPDATE prompt_token SET usage_count = usage_count - 1 "
+                "WHERE id = ? AND usage_count > 0",
+                (int(tid),),
+            )
+        conn.execute(
+            "DELETE FROM image_prompt_token WHERE image_id = ?",
+            (image_id,),
+        )
+        for (gid,) in conn.execute(
+            "SELECT tag_id FROM image_tag WHERE image_id = ?",
+            (image_id,),
+        ).fetchall():
+            conn.execute(
+                "UPDATE tag SET usage_count = usage_count - 1 "
+                "WHERE id = ? AND usage_count > 0",
+                (int(gid),),
+            )
+        conn.execute("DELETE FROM image_tag WHERE image_id = ?", (image_id,))
+        conn.execute("DELETE FROM thumbnail_cache WHERE image_id = ?", (image_id,))
+        conn.execute("DELETE FROM image WHERE id = ?", (image_id,))
+        return image_id
 
 
 # T05: real (non-placeholder) op for registering a root folder. Lives here
@@ -338,6 +597,80 @@ class InsertThumbCacheOp:
         )
 
 
+class SetSyncStatusOp:
+    """Mark PNG metadata sync as ``ok`` only if ``version`` still matches (T17)."""
+
+    def __init__(self, *, image_id: int, expected_version: int):
+        self.image_id = int(image_id)
+        self.expected_version = int(expected_version)
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE image SET "
+            "metadata_sync_status = 'ok', "
+            "metadata_sync_retry_count = 0, "
+            "metadata_sync_next_retry_at = NULL, "
+            "metadata_sync_last_error = NULL "
+            "WHERE id = ? AND version = ?",
+            (self.image_id, self.expected_version),
+        )
+
+
+class SetSyncFailedOp:
+    """Record a failed PNG sync with exponential ``next_retry_at`` (T17)."""
+
+    def __init__(self, *, image_id: int, expected_version: int,
+                 error: str, now: int):
+        self.image_id = int(image_id)
+        self.expected_version = int(expected_version)
+        self.error = (error or "")[:256]
+        self.now = int(now)
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT metadata_sync_retry_count FROM image "
+            "WHERE id = ? AND version = ?",
+            (self.image_id, self.expected_version),
+        ).fetchone()
+        if row is None:
+            return
+        old = int(row[0])
+        new = old + 1
+        if new >= 3:
+            next_at = None
+        else:
+            next_at = self.now + 5 * (2 ** old)
+        conn.execute(
+            "UPDATE image SET "
+            "metadata_sync_status = 'failed', "
+            "metadata_sync_retry_count = ?, "
+            "metadata_sync_next_retry_at = ?, "
+            "metadata_sync_last_error = ? "
+            "WHERE id = ? AND version = ?",
+            (new, next_at, self.error, self.image_id, self.expected_version),
+        )
+
+
+class SetSyncHardFailedOp:
+    """Mark sync as permanently failed without retries (e.g. non-PNG) — T17."""
+
+    def __init__(self, *, image_id: int, expected_version: int, error: str):
+        self.image_id = int(image_id)
+        self.expected_version = int(expected_version)
+        self.error = (error or "")[:256]
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE image SET "
+            "metadata_sync_status = 'failed', "
+            "metadata_sync_retry_count = 3, "
+            "metadata_sync_next_retry_at = NULL, "
+            "metadata_sync_last_error = ? "
+            "WHERE id = ? AND version = ?",
+            (self.error, self.image_id, self.expected_version),
+        )
+
+
 # -- Read side (T09) -------------------------------------------------------
 #
 # All read APIs are synchronous, open a short-lived ``db.connect_read``
@@ -358,6 +691,10 @@ MAX_PAGE_SIZE: int = 500          # clamp: keep per-request work bounded
 # without resorting to ``set_progress_handler`` timer tricks
 # (PROJECT_STATE §7 #5 explicitly left the choice to T09).
 TOTAL_ESTIMATE_CAP: int = 5000
+
+# SPEC §7.7 / NFR-4 — autocomplete row cap (HTTP may clamp further).
+VOCAB_LOOKUP_DEFAULT_LIMIT: int = 20
+VOCAB_LOOKUP_MAX_LIMIT: int = 100
 
 
 _VALID_SORT_KEYS: frozenset = frozenset({"name", "time", "size", "folder"})
@@ -392,8 +729,8 @@ class FilterSpec:
     """Query filter — SPEC §6.2 + FR-3 series.
 
     ``tags_and`` and ``prompts_and`` must be **already normalised** by
-    the caller (PROJECT_STATE §7 #10). T15 + T21 own user-input → token
-    normalisation; T09 treats the tuples as opaque lowercase literals.
+    the HTTP layer (``routes._parse_filter``) or tests. Values must match
+    ``tag.name`` / ``prompt_token.token`` as stored by the indexer (T15).
 
     ``date_after`` / ``date_before`` are Unix epoch seconds
     (half-open: ``after <= created_at < before``) to match the on-disk
@@ -423,9 +760,8 @@ class ImageRecord:
     (``folder{...}``, ``size{...}``, ``metadata{...}``, ``gallery{...}``)
     and injects ``thumb_url`` / ``raw_url``.  ``mtime_ns`` is exposed
     because the T10 thumb URL cache-buster ``?v=<mtime_ns>`` depends on
-    it (§4 #32 / T08).  ``sync_status`` / ``version`` (T16) are
-    intentionally absent — adding them now would shape the DTO against
-    a schema version that does not yet exist (AI_RULES R1.2).
+    it (§4 #32 / T08).  ``sync_status`` / ``version`` wire inside
+    ``gallery.{sync_status,version}`` (T16).
     """
     id: int
     path: str
@@ -451,6 +787,8 @@ class ImageRecord:
     has_workflow: bool
     favorite: bool
     tags: Tuple[str, ...]
+    sync_status: str
+    version: int
 
 
 @dataclass(frozen=True)
@@ -498,6 +836,7 @@ _IMAGE_SELECT = (
     "image.created_at, image.positive_prompt, image.negative_prompt, "
     "image.model, image.seed, image.cfg, image.sampler, image.scheduler, "
     "image.workflow_present, image.favorite, image.tags_csv, "
+    "image.metadata_sync_status, image.version, "
     "folder.kind AS folder_kind, folder.display_name AS folder_display_name "
     "FROM image LEFT JOIN folder ON folder.id = image.folder_id"
 )
@@ -671,29 +1010,33 @@ def _build_filter(
         where.append("image.created_at < ?")
         params.append(int(flt.date_before))
 
-    # TODO T15/T28: migrate to ``EXISTS (SELECT 1 FROM image_tag ...)``
-    # with rarest-first ordering. Current impl is an MVP retreat because
-    # schema v2 has no ``image_tag`` table (that ships in T15).  The
-    # comma-bracketed LIKE enforces token boundaries so the tag ``cat``
-    # does not match ``category`` — the indexer stores tags_csv already
-    # lower-cased (PROJECT_STATE §4 #24) so caller-side lowercasing is
-    # the whole normalisation contract at this stage.
+    # T15 ``image_tag`` / ``image_prompt_token`` — AND semantics on
+    # normalised vocabulary keys (routes + indexer share ``vocab.*``).
     for tag in flt.tags_and:
-        tok = str(tag).strip().lower()
+        tok = str(tag).strip()
         if not tok:
             continue
         where.append(
-            "(',' || IFNULL(image.tags_csv, '') || ',') LIKE ?"
+            "EXISTS ("
+            "SELECT 1 FROM image_tag it "
+            "INNER JOIN tag t ON t.id = it.tag_id "
+            "WHERE it.image_id = image.id AND t.name = ? COLLATE NOCASE"
+            ")"
         )
-        params.append("%," + tok + ",%")
+        params.append(tok)
 
-    # TODO T28: FTS5 prompt token search.
     for token in flt.prompts_and:
         tok = str(token).strip()
         if not tok:
             continue
-        where.append("IFNULL(image.positive_prompt, '') LIKE ?")
-        params.append("%" + tok + "%")
+        where.append(
+            "EXISTS ("
+            "SELECT 1 FROM image_prompt_token ipt "
+            "INNER JOIN prompt_token pt ON pt.id = ipt.token_id "
+            "WHERE ipt.image_id = image.id AND pt.token = ? COLLATE NOCASE"
+            ")"
+        )
+        params.append(tok)
 
     if not where:
         return "1=1", params
@@ -732,7 +1075,113 @@ def _row_to_image_record(row: sqlite3.Row) -> ImageRecord:
         has_workflow=bool(row["workflow_present"]),
         favorite=bool(row["favorite"]) if row["favorite"] is not None else False,
         tags=tags,
+        sync_status=str(
+            row["metadata_sync_status"] if row["metadata_sync_status"] is not None else "ok"
+        ),
+        version=int(row["version"] or 0),
     )
+
+
+def _like_prefix_pattern(raw: str) -> str:
+    """Escape ``%`` / ``_`` / ``\\`` for SQLite LIKE, then add trailing ``%``."""
+    s = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return s + "%"
+
+
+def vocab_lookup(
+    *,
+    db_path: _PathArg,
+    kind: str,
+    prefix: str = "",
+    limit: int = VOCAB_LOOKUP_DEFAULT_LIMIT,
+) -> Tuple[Dict[str, Any], ...]:
+    """Autocomplete rows: ``{name, usage_count}`` sorted per SPEC §7.7."""
+    if kind not in ("tags", "prompts"):
+        raise ValueError(f"unknown vocab kind: {kind!r}")
+    lim = max(1, min(int(limit), VOCAB_LOOKUP_MAX_LIMIT))
+    pref = (prefix or "").strip()
+    conn = _db.connect_read(db_path)
+    try:
+        if kind == "tags":
+            base = "SELECT tag.name AS name, tag.usage_count AS usage_count FROM tag"
+            if not pref:
+                sql = (
+                    f"{base} "
+                    "ORDER BY tag.usage_count DESC, tag.name ASC LIMIT ?"
+                )
+                rows = conn.execute(sql, (lim,)).fetchall()
+            else:
+                pat = _like_prefix_pattern(pref)
+                sql = (
+                    f"{base} "
+                    "WHERE tag.name LIKE ? ESCAPE '\\' "
+                    "ORDER BY tag.usage_count DESC, tag.name ASC LIMIT ?"
+                )
+                rows = conn.execute(sql, (pat, lim)).fetchall()
+        else:
+            base = (
+                "SELECT prompt_token.token AS name, "
+                "prompt_token.usage_count AS usage_count "
+                "FROM prompt_token"
+            )
+            if not pref:
+                sql = (
+                    f"{base} "
+                    "ORDER BY prompt_token.usage_count DESC, "
+                    "prompt_token.token ASC LIMIT ?"
+                )
+                rows = conn.execute(sql, (lim,)).fetchall()
+            else:
+                pat = _like_prefix_pattern(pref)
+                sql = (
+                    f"{base} "
+                    "WHERE prompt_token.token LIKE ? ESCAPE '\\' "
+                    "ORDER BY prompt_token.usage_count DESC, "
+                    "prompt_token.token ASC LIMIT ?"
+                )
+                rows = conn.execute(sql, (pat, lim)).fetchall()
+    finally:
+        conn.close()
+    return tuple(
+        {"name": str(r["name"]), "usage_count": int(r["usage_count"])}
+        for r in rows
+    )
+
+
+def model_vocab_label(full_name: str) -> str:
+    """Human label for ``image.model`` — same canonical strip as DB (T21)."""
+    n = _vocab.normalize_stored_model(full_name)
+    if n is not None:
+        return n
+    return (full_name or "").strip()
+
+
+def list_models_for_vocab(*, db_path: _PathArg) -> Tuple[Dict[str, Any], ...]:
+    """Per distinct ``image.model``: canonical value, label, image usage count.
+
+    Sorted **alphabetically** by model (FR-3e style model picker).
+    """
+    conn = _db.connect_read(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT model, COUNT(*) AS usage_count FROM image "
+            "WHERE model IS NOT NULL AND TRIM(model) != '' "
+            "GROUP BY model "
+            "ORDER BY model COLLATE NOCASE",
+        ).fetchall()
+    finally:
+        conn.close()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        full = str(r[0])
+        out.append(
+            {
+                "model": full,
+                "label": model_vocab_label(full),
+                "usage_count": int(r[1]),
+            }
+        )
+    return tuple(out)
 
 
 # ---- Public read APIs ----------------------------------------------------

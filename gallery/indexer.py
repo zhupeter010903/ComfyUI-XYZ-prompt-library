@@ -9,8 +9,9 @@ Scope (per TASKS.md T07 + PROJECT_STATE §7):
   without the Pillow decode; differences hand off to ``index_one``.
   Exposed here for T20 watcher heartbeat and T25 drift checks; not
   called anywhere in T07 itself but part of the module contract.
-* ``index_one(path)`` — single-file path (used by ``cold_scan`` itself
-  and, later, by watcher callbacks).
+* ``index_one(path)`` — single-file path; returns ``image.id`` after
+  the LOW write, or ``None`` if skipped (watcher T20, ``service`` 广播 id).
+* ``delete_one(path)`` — T20 watcher: delete DB row by POSIX path, idem.
 * ``_inflight`` + ``_inflight_lock`` — module-wide de-duplication
   barrier keyed on ``os.path.realpath + os.path.normcase`` (TASKS T07
   UPDATED / T20 UPDATED).  Released unconditionally in ``finally``.
@@ -25,6 +26,7 @@ Boundaries:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -37,6 +39,7 @@ from PIL import Image, UnidentifiedImageError
 from . import db as _db
 from . import metadata as _metadata
 from . import repo as _repo
+from . import vocab as _vocab
 
 logger = logging.getLogger("xyz.gallery.indexer")
 
@@ -44,6 +47,8 @@ __all__ = [
     "cold_scan",
     "delta_scan",
     "index_one",
+    "delete_one",
+    "is_cold_scanning",
     "schedule_cold_scan_all",
 ]
 
@@ -58,6 +63,7 @@ _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 # future watcher callback (T20). Keys are ``normcase(realpath(path))``.
 _inflight: Set[str] = set()
 _inflight_lock: threading.Lock = threading.Lock()
+_cold_thread: Optional[threading.Thread] = None
 
 
 def _normalise_key(path: _PathLike) -> str:
@@ -126,6 +132,8 @@ def _load_single_fingerprint(
 # -- parsing helpers --------------------------------------------------------
 
 def _is_image(name: str) -> bool:
+    if _metadata.is_gallery_atomic_temp_basename(name):
+        return False
     ext = os.path.splitext(name)[1].lower()
     return ext in _IMAGE_EXTS
 
@@ -144,14 +152,42 @@ def _read_dims(path: str) -> Tuple[Optional[int], Optional[int]]:
 
 
 def _normalise_tags_csv(raw: Optional[str]) -> Optional[str]:
-    # Per PROJECT_STATE §4 #24: tags mirror normalisation lives at exactly
-    # one point in T07 (here), NOT in metadata.py. Full vocab-level
-    # normalisation (stopwords / weight stripping) is T15's job; this is
-    # the strict minimum: trim, lower-case, split on commas.
+    # Per PROJECT_STATE §4 #24: tags mirror normalisation for ``tags_csv``
+    # stays minimal (trim / lower / comma split). Link-table tag strings for
+    # ``tag`` / ``image_tag`` use ``vocab.normalize_tag`` (T15) in
+    # ``_normalized_tag_list``.
     if raw is None:
         return None
     parts = [t.strip().lower() for t in str(raw).split(",") if t.strip()]
     return ",".join(parts) if parts else None
+
+
+def _load_prompt_stopwords(db_path: _PathLike) -> frozenset:
+    cfg = Path(db_path).parent / "gallery_config.json"
+    if not cfg.is_file():
+        return frozenset()
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except Exception:
+        return frozenset()
+    words = data.get("prompt_stopwords")
+    if not words:
+        return frozenset()
+    return frozenset(str(w).strip().lower() for w in words if str(w).strip())
+
+
+def _normalized_tag_list(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    seen: Set[str] = set()
+    out: List[str] = []
+    for part in str(raw).split(","):
+        nt = _vocab.normalize_tag(part)
+        if not nt or nt in seen:
+            continue
+        seen.add(nt)
+        out.append(nt)
+    return out
 
 
 def _normalise_favorite(raw: Optional[str]) -> Optional[int]:
@@ -169,7 +205,7 @@ def _normalise_favorite(raw: Optional[str]) -> Optional[int]:
 
 def _build_upsert_op(
     *, abs_path: str, root: Dict[str, Any], stat_result: os.stat_result,
-    meta: _metadata.ComfyMeta,
+    meta: _metadata.ComfyMeta, extra_stopwords: frozenset,
 ) -> _repo.UpsertImageOp:
     # Store paths as POSIX absolute strings — invariant §4 #9.
     posix_path = Path(abs_path).as_posix()
@@ -183,6 +219,8 @@ def _build_upsert_op(
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     width, height = _read_dims(abs_path)
     now = int(time.time())
+    prompt_tokens = _vocab.normalize_prompt(meta.positive_prompt, extra_stopwords)
+    normalized_tags = _normalized_tag_list(meta.tags)
     return _repo.UpsertImageOp(
         path=posix_path,
         folder_id=int(root["id"]),
@@ -203,7 +241,7 @@ def _build_upsert_op(
         created_at=int(stat_result.st_mtime),
         positive_prompt=meta.positive_prompt,
         negative_prompt=meta.negative_prompt,
-        model=meta.model,
+        model=_vocab.normalize_stored_model(meta.model),
         seed=meta.seed,
         cfg=meta.cfg,
         sampler=meta.sampler,
@@ -212,6 +250,8 @@ def _build_upsert_op(
         favorite=_normalise_favorite(meta.favorite),
         tags_csv=_normalise_tags_csv(meta.tags),
         indexed_at=now,
+        prompt_tokens=prompt_tokens,
+        normalized_tags=normalized_tags,
     )
 
 
@@ -254,6 +294,7 @@ def cold_scan(
         return {"walked": 0, "skipped": 0, "enqueued": 0, "errors": 0}
 
     fingerprints = _load_fingerprints(db_path, root_id)
+    extra_sw = _load_prompt_stopwords(db_path)
 
     walked = 0
     skipped = 0
@@ -292,6 +333,7 @@ def cold_scan(
                 op = _build_upsert_op(
                     abs_path=abs_path, root=root,
                     stat_result=st, meta=meta,
+                    extra_stopwords=extra_sw,
                 )
             except Exception:
                 errors += 1
@@ -325,41 +367,71 @@ def cold_scan(
 def index_one(
     path: _PathLike, *, root: Dict[str, Any],
     db_path: _PathLike, write_queue,
-) -> bool:
-    """Index a single file. Returns True iff an upsert was enqueued.
+) -> Optional[int]:
+    """Index a single file. Returns the ``image.id`` if a row was written.
 
-    Used by ``cold_scan`` internally only indirectly; exposed for the
-    T20 watcher callback (TASKS T20 UPDATED explicitly forbids watcher
-    from inventing its own dedup, so it will call back into here).
+    Returns ``None`` when the path is skipped (inflight loss, stat
+    failure, or fingerprint still matches) — T07 test #2 / #5 semantics.
 
-    The inflight barrier is released on EVERY return path (including
-    "no-op because fingerprint matched") so that later calls for the
-    same path are never silently suppressed — test #5 in TASKS T07.
+    ``delete_one`` is the delete counterpart for T20 watcher.
     """
     abs_path = str(path)
+    if _metadata.is_gallery_atomic_temp_basename(os.path.basename(abs_path)):
+        return None
     key = _normalise_key(abs_path)
     if not _claim(key):
-        return False
+        return None
     try:
         try:
             st = os.stat(abs_path)
         except OSError:
-            return False
+            return None
 
         posix_path = Path(abs_path).as_posix()
         cached = _load_single_fingerprint(db_path, posix_path)
         if cached is not None and cached == (
             int(st.st_size), int(st.st_mtime_ns)
         ):
-            return False
+            return None
 
         meta = _metadata.read_comfy_metadata(abs_path)
+        extra_sw = _load_prompt_stopwords(db_path)
         op = _build_upsert_op(
             abs_path=abs_path, root=root,
             stat_result=st, meta=meta,
+            extra_stopwords=extra_sw,
         )
-        write_queue.enqueue_write(_repo.LOW, op)
-        return True
+        fut = write_queue.enqueue_write(_repo.LOW, op)
+        fut.result(timeout=30.0)
+        conn = _db.connect_read(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM image WHERE path = ?",
+                (posix_path,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row is not None else None
+    finally:
+        _release(key)
+
+
+def delete_one(
+    path: _PathLike, *, db_path: _PathLike, write_queue,
+) -> Optional[int]:
+    """Delete DB row for ``path`` (POSIX) if present.  Returns deleted id or None.
+
+    Deduplication uses the same ``_inflight`` set as ``index_one``.  Safe
+    when the file is already missing on disk.
+    """
+    abs_path = str(path)
+    key = _normalise_key(abs_path)
+    if not _claim(key):
+        return None
+    try:
+        posix_path = Path(abs_path).as_posix()
+        fut = write_queue.enqueue_write(_repo.LOW, _repo.DeleteImageOp(path=posix_path))
+        return fut.result(timeout=30.0)
     finally:
         _release(key)
 
@@ -445,6 +517,12 @@ def _cold_scan_all_worker(db_path: _PathLike, write_queue) -> None:
             )
 
 
+def is_cold_scanning() -> bool:
+    """True while the T07 one-shot ``schedule_cold_scan_all`` thread is alive."""
+    t = _cold_thread
+    return t is not None and t.is_alive()
+
+
 def schedule_cold_scan_all(
     *, db_path: _PathLike, write_queue,
 ) -> threading.Thread:
@@ -454,6 +532,7 @@ def schedule_cold_scan_all(
     fan-out is T27's scope and must not leak forward here
     (AI_RULES R1.2).
     """
+    global _cold_thread
     t = threading.Thread(
         target=_cold_scan_all_worker,
         args=(db_path, write_queue),
@@ -461,4 +540,5 @@ def schedule_cold_scan_all(
         daemon=True,
     )
     t.start()
+    _cold_thread = t
     return t

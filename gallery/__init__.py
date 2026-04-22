@@ -42,12 +42,19 @@ def start_background_services() -> None:
     # to both start and stop hooks per PROJECT_STATE §4 #17.
     from . import thumbs as _thumbs
     _thumbs.start_touch_flusher(write_queue=_write_queue)
+    from . import metadata_sync as _metadata_sync
+    _metadata_sync.start_metadata_sync_worker(
+        db_path=DB_PATH, write_queue=_write_queue,
+    )
 
 
 def stop_background_services() -> None:
     global _write_queue
-    # Reverse startup order: drain thumbs touches before the WriteQueue
-    # they're enqueued into disappears.
+    # Reverse startup order: stop producers before the WriteQueue closes.
+    from . import metadata_sync as _metadata_sync
+    _metadata_sync.stop_metadata_sync_worker()
+    from . import watcher as _watcher
+    _watcher.stop_file_watchers()
     from . import thumbs as _thumbs
     _thumbs.stop_touch_flusher()
     if _write_queue is not None:
@@ -90,6 +97,8 @@ def setup(app=None) -> None:
             db_path=DB_PATH,
             write_queue=_write_queue,
         )
+        from . import watcher as _watcher
+        _watcher.start_file_watchers(db_path=DB_PATH, write_queue=_write_queue)
         _initialized = True
         logger.info("XYZ Gallery initialized (data dir: %s)", DATA_DIR)
 

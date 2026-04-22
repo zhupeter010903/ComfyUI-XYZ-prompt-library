@@ -166,12 +166,12 @@ def main() -> None:
             # Simulate by pointing index_one at a file that PIL will fail on.
             bad = root_dir / "broken.png"
             bad.write_bytes(b"\x89PNG\r\n\x1a\n_garbage_")
-            ok = indexer.index_one(
+            iid = indexer.index_one(
                 bad, root=root, db_path=db_path, write_queue=wq,
             )
             # Bad file is still a new path → upsert enqueued (errors tuple
             # in meta is informational; the row should still materialise).
-            assert ok is True
+            assert isinstance(iid, int) and iid > 0
             time.sleep(0.2)
             assert len(indexer._inflight) == 0
             print("T07 bonus OK (broken PNG still indexed, inflight clean)")

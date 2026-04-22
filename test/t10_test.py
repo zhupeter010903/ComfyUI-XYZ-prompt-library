@@ -409,6 +409,8 @@ async def _assert_single_and_404(client: TestClient, ref: Dict[str, Any]
     assert data["metadata"]["has_workflow"] is True
     assert data["gallery"]["favorite"] is True
     assert "cat" in data["gallery"]["tags"]
+    assert data["gallery"]["sync_status"] == "ok"
+    assert data["gallery"]["version"] == 0
     print("T10 image detail nested shape OK")
 
     r = await client.get("/xyz/gallery/image/999999")

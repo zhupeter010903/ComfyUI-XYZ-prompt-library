@@ -4643,15 +4643,15 @@ app.registerExtension({
         windowDebug('updateAllPromptLibraryNodes', 'no prompt library nodes detected');
       }
 
+      // Single canonical JSON for all nodes, cache, and broadcast (must be in outer scope)
+      const serializedData = JSON.stringify(this.libraryData || {}, null, 2);
+
       // Update each node's library data
       promptLibraryNodes.forEach(node => {
         if (!node.libraryWidget) {
           windowDebug('updateAllPromptLibraryNodes', node.id, 'libraryWidget missing');
           return;
         }
-
-        // Send ID-indexed data directly - backend will convert to name-indexed
-        const serializedData = JSON.stringify(this.libraryData || {}, null, 2);
 
         // Update prompt library node with current data
         if (node.libraryWidget.value !== serializedData) {

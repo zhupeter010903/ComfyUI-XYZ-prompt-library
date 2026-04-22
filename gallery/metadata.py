@@ -8,9 +8,10 @@ Boundary notes (PROJECT_STATE §7 / AI_RULES R5.5):
 
 * No SQLite knowledge here.  No imports from ``repo`` / ``db`` /
   ``folders`` / ``paths``.
-* Pure: read-only on disk, no logging side effects on caller state, no
-  background tasks scheduled.  Two calls with the same input file return
-  equal :class:`ComfyMeta` instances.
+* Read helpers are pure: read-only on disk, no logging side effects on
+  caller state, no background tasks scheduled.  Two calls with the same
+  input file return equal :class:`ComfyMeta` instances.
+  :func:`write_xyz_chunks` mutates the target PNG atomically (T17).
 * Failure-tolerant: malformed / non-PNG / missing-chunk inputs return a
   partially-filled :class:`ComfyMeta` plus an ``errors`` tuple — never
   raise (NFR-1, TASKS T06 test #3).
@@ -19,13 +20,16 @@ Boundary notes (PROJECT_STATE §7 / AI_RULES R5.5):
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from PIL import Image, UnidentifiedImageError
+from PIL.PngImagePlugin import PngInfo
 
 
 _KEY_PROMPT = "prompt"          # ComfyUI: API workflow JSON (executable form)
@@ -34,6 +38,17 @@ _KEY_PARAMETERS = "parameters"  # A1111-style human-readable text
 
 _KEY_XYZ_TAGS = "xyz_gallery.tags"
 _KEY_XYZ_FAVORITE = "xyz_gallery.favorite"
+
+# ``write_xyz_chunks`` uses :func:`tempfile.mkstemp` with this prefix;
+# watcher / indexer must skip these names (they are not real gallery assets).
+GALLERY_ATOMIC_TMP_PREFIX = ".xyz_gallery_"
+
+
+def is_gallery_atomic_temp_basename(name: str) -> bool:
+    """True for temp names created next to the target PNG during atomic writes."""
+    s = str(name or "")
+    return s.startswith(GALLERY_ATOMIC_TMP_PREFIX) and s.lower().endswith(".png")
+
 
 _SAMPLER_NODE_HINTS: Tuple[str, ...] = ("KSampler", "Sampler")
 _CHECKPOINT_NODE_HINTS: Tuple[str, ...] = ("Checkpoint", "Loader", "Model")
@@ -333,6 +348,83 @@ def _float_or_none(value: Any, errors: list[str]) -> Optional[float]:
         return None
 
 
+def write_xyz_chunks(
+    path: Any,
+    tags: Optional[str],
+    favorite: Optional[int],
+) -> None:
+    """Write gallery mirror chunks to a PNG; preserve all other tEXt / iTXt.
+
+    Atomically replaces the file (write-temp + :func:`os.replace`). Only keys
+    whose names start with ``xyz_gallery.`` are removed and optionally replaced
+    by new ``xyz_gallery.tags`` / ``xyz_gallery.favorite`` chunks — every other
+    text chunk (``prompt``, ``workflow``, …) is copied verbatim (C-6 /
+    TASKS.md T17).
+
+    ``tags`` / ``favorite`` mirror :func:`read_comfy_metadata` wire shapes:
+    ``tags`` is the raw ``tags_csv`` string (or ``None`` to omit the chunk);
+    ``favorite`` is ``0`` / ``1`` / ``None`` (omit chunk). This stays aligned
+    with indexer normalisation (PROJECT_STATE §4 #24).
+
+    Raises:
+        FileNotFoundError: path does not exist.
+        ValueError: not a PNG or Pillow cannot decode the image.
+        OSError: temp write / replace failed (permissions, disk full, …).
+    """
+
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(str(p))
+    tmp_fd: Optional[int] = None
+    tmp_path: Optional[Path] = None
+    try:
+        with Image.open(p) as img:
+            img.load()
+            if (img.format or "").upper() != "PNG":
+                raise ValueError(f"not a PNG: format={img.format!r}")
+            text = dict(getattr(img, "text", {}) or {})
+            pnginfo = PngInfo()
+            for key, value in text.items():
+                sk = str(key)
+                if sk.startswith("xyz_gallery."):
+                    continue
+                pnginfo.add_text(sk, str(value), zip=False)
+            if tags is not None:
+                pnginfo.add_text(_KEY_XYZ_TAGS, str(tags), zip=False)
+            if favorite is not None:
+                fav_s = "1" if int(favorite) else "0"
+                pnginfo.add_text(_KEY_XYZ_FAVORITE, fav_s, zip=False)
+            parent = p.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                suffix=".png",
+                prefix=GALLERY_ATOMIC_TMP_PREFIX,
+                dir=str(parent),
+            )
+            tmp_path = Path(tmp_name)
+            os.close(tmp_fd)
+            tmp_fd = None
+            img.save(
+                tmp_path,
+                format="PNG",
+                pnginfo=pnginfo,
+                compress_level=6,
+            )
+        os.replace(tmp_path, p)
+        tmp_path = None
+    finally:
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 def read_workflow_chunk(path) -> Optional[str]:
     """Return the raw ``workflow`` tEXt/iTXt chunk verbatim, or ``None``.
 
@@ -357,4 +449,11 @@ def read_workflow_chunk(path) -> Optional[str]:
     return s if s != "" else None
 
 
-__all__ = ["ComfyMeta", "read_comfy_metadata", "read_workflow_chunk"]
+__all__ = [
+    "ComfyMeta",
+    "GALLERY_ATOMIC_TMP_PREFIX",
+    "is_gallery_atomic_temp_basename",
+    "read_comfy_metadata",
+    "read_workflow_chunk",
+    "write_xyz_chunks",
+]

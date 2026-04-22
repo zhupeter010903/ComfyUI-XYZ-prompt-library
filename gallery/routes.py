@@ -1,5 +1,16 @@
 """HTTP routes for the XYZ Image Gallery (T02 placeholder + T10 read endpoints).
 
+T18 adds ``GET /xyz/gallery/ws`` (WebSocket) — see ``gallery/ws_hub.py``.
+
+T19 adds ``PATCH /xyz/gallery/image/{id}``, ``POST …/resync``, and a
+``DELETE`` stub — see ``gallery/service.py``.
+
+T21 adds ``GET /xyz/gallery/vocab/{tags,prompts,models}`` for autocomplete
+and model vocab (``repo.vocab_lookup`` / ``list_models_for_vocab``).
+
+T22 adds ``GET /xyz/gallery/index/status`` for focus reconciliation
+(SPEC §7.8 / §7.9).
+
 T10 scope (TASKS.md T10):
   * SPA shell + static assets (``/xyz/gallery`` + ``/static/*``).
   * Read-only data endpoints backed by ``repo`` read APIs (T09):
@@ -28,7 +39,9 @@ Boundary notes (ARCHITECTURE §2.1 / AI_RULES R5.5 / R7.1):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,11 +50,15 @@ from typing import Any, Optional
 from aiohttp import web
 
 from . import DATA_DIR, DB_PATH, THUMBS_DIR
+from . import vocab as _vocab
 from . import folders as _folders
+from . import indexer as _indexer
 from . import metadata as _metadata
 from . import paths as _paths
 from . import repo as _repo
+from . import service as _service
 from . import thumbs as _thumbs
+from . import ws_hub as _ws_hub
 
 logger = logging.getLogger("xyz.gallery.routes")
 
@@ -139,7 +156,12 @@ def _serialize_image(rec: _repo.ImageRecord) -> dict:
             "scheduler": rec.scheduler,
             "has_workflow": rec.has_workflow,
         },
-        "gallery": {"favorite": rec.favorite, "tags": list(rec.tags)},
+        "gallery": {
+            "favorite": rec.favorite,
+            "tags": list(rec.tags),
+            "sync_status": rec.sync_status,
+            "version": rec.version,
+        },
         "thumb_url": f"/xyz/gallery/thumb/{rec.id}{v_suffix}",
         "raw_url": f"/xyz/gallery/raw/{rec.id}",
     }
@@ -159,6 +181,19 @@ def _serialize_folder(node: _repo.FolderNode) -> dict:
     }
 
 
+def _prompt_extra_stopwords() -> frozenset:
+    """Mirror ``indexer`` / ``gallery_config.json`` prompt_stopwords (T15)."""
+    try:
+        cfg = DATA_DIR / "gallery_config.json"
+        if not cfg.is_file():
+            return frozenset()
+        blob = json.loads(cfg.read_text(encoding="utf-8"))
+        arr = blob.get("prompt_stopwords", [])
+        return frozenset(str(x).lower() for x in arr if x)
+    except Exception:
+        return frozenset()
+
+
 def _parse_filter(query) -> _repo.FilterSpec:
     fav = query.get("favorite", "all")
     if fav not in ("all", "yes", "no"):
@@ -168,6 +203,22 @@ def _parse_filter(query) -> _repo.FilterSpec:
         folder_id = int(fid_raw) if fid_raw not in (None, "") else None
     except ValueError as exc:
         raise ValueError(f"invalid folder_id: {fid_raw!r}") from exc
+    extra_sw = _prompt_extra_stopwords()
+    tags_and_list: list[str] = []
+    for t in query.getall("tag", []):
+        nt = _vocab.normalize_tag(t)
+        if nt:
+            tags_and_list.append(nt)
+    tags_and = tuple(dict.fromkeys(tags_and_list))
+
+    prompts_and_list: list[str] = []
+    for p in query.getall("prompt", []):
+        s = str(p).strip()
+        if not s:
+            continue
+        prompts_and_list.extend(_vocab.normalize_prompt(s, extra_sw))
+    prompts_and = tuple(dict.fromkeys(prompts_and_list))
+
     return _repo.FilterSpec(
         name=(query.get("name") or None),
         favorite=fav,
@@ -176,8 +227,8 @@ def _parse_filter(query) -> _repo.FilterSpec:
         date_before=_parse_iso_date(query.get("date_before")),
         folder_id=folder_id,
         recursive=_is_true(query, "recursive", default=False),
-        tags_and=tuple(t for t in query.getall("tag", []) if t),
-        prompts_and=tuple(t for t in query.getall("prompt", []) if t),
+        tags_and=tags_and,
+        prompts_and=prompts_and,
     )
 
 
@@ -317,6 +368,92 @@ async def _images_count(request: web.Request) -> web.Response:
     )
 
 
+def _read_index_status() -> dict:
+    page = _repo.list_images(
+        db_path=DB_PATH,
+        filter=_repo.FilterSpec(),
+        sort=_repo.SortSpec(),
+        cursor=None,
+        limit=1,
+    )
+    return {
+        "scanning": _indexer.is_cold_scanning(),
+        "pending_events": 0,
+        "last_full_scan_at": None,
+        "totals": {
+            "images": page.total,
+            "approximate": page.total_approximate,
+        },
+        "last_event_ts": _ws_hub.get_last_event_ts(),
+    }
+
+
+async def _get_index_status(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(await _run(_read_index_status))
+    except Exception as exc:
+        logger.exception("index_status failed")
+        return _error(500, "internal", str(exc))
+
+
+def _parse_vocab_limit(query) -> int:
+    raw = query.get("limit")
+    if raw in (None, ""):
+        return _repo.VOCAB_LOOKUP_DEFAULT_LIMIT
+    try:
+        v = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid limit: {raw!r}") from exc
+    return max(1, min(v, _repo.VOCAB_LOOKUP_MAX_LIMIT))
+
+
+async def _get_vocab_tags(request: web.Request) -> web.Response:
+    try:
+        limit = _parse_vocab_limit(request.query)
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    prefix = request.query.get("prefix", "")
+    try:
+        rows = await _run(
+            _repo.vocab_lookup,
+            db_path=DB_PATH, kind="tags", prefix=prefix, limit=limit,
+        )
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    except Exception as exc:
+        logger.exception("vocab_lookup tags failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(list(rows))
+
+
+async def _get_vocab_prompts(request: web.Request) -> web.Response:
+    try:
+        limit = _parse_vocab_limit(request.query)
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    prefix = request.query.get("prefix", "")
+    try:
+        rows = await _run(
+            _repo.vocab_lookup,
+            db_path=DB_PATH, kind="prompts", prefix=prefix, limit=limit,
+        )
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    except Exception as exc:
+        logger.exception("vocab_lookup prompts failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(list(rows))
+
+
+async def _get_vocab_models(request: web.Request) -> web.Response:
+    try:
+        models = await _run(_repo.list_models_for_vocab, db_path=DB_PATH)
+    except Exception as exc:
+        logger.exception("list_models_for_vocab failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(list(models))
+
+
 async def _get_image(request: web.Request) -> web.Response:
     image_id = int(request.match_info["id"])
     try:
@@ -409,6 +546,46 @@ async def _get_raw_download(request: web.Request) -> web.StreamResponse:
     return await _serve_raw(request, as_attachment=True)
 
 
+def _ws_pong_envelope() -> str:
+    # Same shape as SPEC §7.9 (type / data / ts) — application-level ping.
+    return json.dumps(
+        {"type": "pong", "data": {}, "ts": int(time.time() * 1000)},
+        separators=(",", ":"),
+    )
+
+
+async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
+    """SPEC §7.9 — server → client push; client may send text ``ping``."""
+    from . import ws_hub as _ws_hub
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    await _ws_hub.add_client(ws)
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                raw = msg.data.strip()
+                if raw.lower() == "ping":
+                    await ws.send_str(_ws_pong_envelope())
+                    continue
+                if raw.startswith("{"):
+                    try:
+                        obj = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj, dict) and obj.get("type") == "ping":
+                        await ws.send_str(_ws_pong_envelope())
+            elif msg.type in (
+                web.WSMsgType.CLOSE,
+                web.WSMsgType.CLOSING,
+                web.WSMsgType.ERROR,
+            ):
+                break
+    finally:
+        await _ws_hub.remove_client(ws)
+    return ws
+
+
 async def _get_workflow(request: web.Request) -> web.Response:
     image_id = int(request.match_info["id"])
     try:
@@ -447,6 +624,63 @@ async def _get_workflow(request: web.Request) -> web.Response:
     )
 
 
+async def _patch_image(request: web.Request) -> web.Response:
+    image_id = int(request.match_info["id"])
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    try:
+        rec = await _run(
+            _service.update_image, image_id, body, db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("update_image failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("update_image failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(_serialize_image(rec))
+
+
+async def _post_resync(request: web.Request) -> web.Response:
+    image_id = int(request.match_info["id"])
+    try:
+        rec = await _run(_service.resync_image, image_id, db_path=DB_PATH)
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("resync_image failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("resync_image failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(_serialize_image(rec))
+
+
+async def _delete_image_stub(request: web.Request) -> web.Response:
+    image_id = int(request.match_info.get("id", "0"))
+    return _error(
+        501,
+        "not_implemented",
+        f"DELETE /xyz/gallery/image/{image_id} is not implemented (T25)",
+    )
+
+
 # ---- registration --------------------------------------------------------
 
 def register(server) -> None:
@@ -464,16 +698,25 @@ def register(server) -> None:
     routes.get("/xyz/gallery")(_serve_spa)
     routes.get(r"/xyz/gallery/static/{tail:.*}")(_serve_static)
     routes.get("/xyz/gallery/folders")(_get_folders)
+    routes.get("/xyz/gallery/vocab/tags")(_get_vocab_tags)
+    routes.get("/xyz/gallery/vocab/prompts")(_get_vocab_prompts)
+    routes.get("/xyz/gallery/vocab/models")(_get_vocab_models)
+    routes.get("/xyz/gallery/index/status")(_get_index_status)
     routes.get("/xyz/gallery/images")(_list_images)
     routes.get("/xyz/gallery/images/count")(_images_count)
     routes.get(r"/xyz/gallery/image/{id:\d+}")(_get_image)
     routes.get(r"/xyz/gallery/image/{id:\d+}/neighbors")(_image_neighbors)
     routes.get(r"/xyz/gallery/image/{id:\d+}/workflow.json")(_get_workflow)
+    routes.patch(r"/xyz/gallery/image/{id:\d+}")(_patch_image)
+    routes.post(r"/xyz/gallery/image/{id:\d+}/resync")(_post_resync)
+    routes.delete(r"/xyz/gallery/image/{id:\d+}")(_delete_image_stub)
     routes.get(r"/xyz/gallery/thumb/{id:\d+}")(_get_thumb)
     routes.get(r"/xyz/gallery/raw/{id:\d+}")(_get_raw_inline)
     routes.get(r"/xyz/gallery/raw/{id:\d+}/download")(_get_raw_download)
+    routes.get("/xyz/gallery/ws")(_ws_handler)
 
     _registered = True
     logger.info(
-        "XYZ Gallery routes registered (/xyz/gallery + read endpoints)"
+        "XYZ Gallery routes registered (/xyz/gallery + vocab + read + "
+        "write stub + ws)"
     )

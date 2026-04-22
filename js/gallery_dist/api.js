@@ -9,8 +9,8 @@
 //   * AbortController support via opts.signal (bubbles AbortError).
 //   * Array-valued query entries encode as repeated key
 //     (tag=a&tag=b) to match routes.py _parse_filter's getall('tag').
-//   * openWS() is a *stub* — the real /xyz/gallery/ws route lands in
-//     T18 (AI_RULES R1.2 — no cross-task implementation).
+//   * openWS() — one-shot WebSocket; reconnection is stores/connection.js
+//     (T22). buildGalleryWebSocketUrl() is shared.
 
 const BASE = '/xyz/gallery';
 
@@ -96,20 +96,57 @@ export const post  = (path, body, opts) => _request('POST',  path, { ...opts, bo
 export const patch = (path, body, opts) => _request('PATCH', path, { ...opts, body });
 export const del   = (path, opts) => _request('DELETE', path, opts);
 
-// Stubbed — the real WebSocket route (/xyz/gallery/ws) and message
-// handling belong to T18. Returning a shaped object lets later views
-// (T22+) wire their handlers today without needing a second rollout.
+/** ws:// or wss:// URL for same-origin /xyz/gallery/ws (browser only). */
+export function buildGalleryWebSocketUrl() {
+  if (typeof location === 'undefined' || !location.host) return '';
+  const p = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${p}://${location.host}${BASE}/ws`;
+}
+
+/**
+ * Single WebSocket (no auto-reconnect). For gallery SPA use
+ * startGalleryConnection() which wraps URL + backoff.
+ */
 export function openWS(handlers = {}) {
+  if (typeof WebSocket === 'undefined' || !buildGalleryWebSocketUrl()) {
+    return {
+      isStub: true,
+      handlers,
+      send() { /* no-op */ },
+      close() { /* no-op */ },
+    };
+  }
+  const url = buildGalleryWebSocketUrl();
+  const ws = new WebSocket(url);
+  if (handlers.onOpen) {
+    ws.addEventListener('open', () => handlers.onOpen());
+  }
+  ws.addEventListener('message', (ev) => {
+    if (!handlers.onMessage) return;
+    let o;
+    try {
+      o = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    handlers.onMessage(o);
+  });
+  if (handlers.onClose) {
+    ws.addEventListener('close', () => handlers.onClose());
+  }
+  if (handlers.onError) {
+    ws.addEventListener('error', () => handlers.onError());
+  }
   return {
-    isStub: true,
+    isStub: false,
     handlers,
-    send() { /* no-op */ },
-    close() { /* no-op */ },
+    send(text) { try { ws.send(text); } catch { /* ignore */ } },
+    close() { try { ws.close(); } catch { /* ignore */ } },
   };
 }
 
 export const BASE_URL = BASE;
 
 export default {
-  get, post, patch, delete: del, openWS, ApiError, BASE_URL,
+  get, post, patch, delete: del, openWS, buildGalleryWebSocketUrl, ApiError, BASE_URL,
 };

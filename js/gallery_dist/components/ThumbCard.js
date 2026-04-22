@@ -16,6 +16,7 @@
 //   and swap in api.patch() later without re-plumbing the child.
 // * Right-click opens a placeholder context menu (FR-14 `Move…` /
 //   `Delete…`); the actual actions land in T24 / T25.
+// * T22: `gallery.sync_status` — pending=amber dot, failed=red dot, ok=hidden.
 import { defineComponent, computed } from 'vue';
 
 export const ThumbCard = defineComponent({
@@ -28,6 +29,17 @@ export const ThumbCard = defineComponent({
     const isFav = computed(
       () => !!(props.item && props.item.gallery && props.item.gallery.favorite),
     );
+    const syncBadge = computed(() => {
+      const s = props.item && props.item.gallery && props.item.gallery.sync_status;
+      if (s === 'pending') return 'pending';
+      if (s === 'failed') return 'failed';
+      return null;
+    });
+    const syncTitle = computed(() => {
+      if (syncBadge.value === 'pending') return 'Metadata sync: pending';
+      if (syncBadge.value === 'failed') return 'Metadata sync: failed';
+      return '';
+    });
 
     function onClick() {
       emit('open', props.item.id);
@@ -41,11 +53,12 @@ export const ThumbCard = defineComponent({
       emit('toggle-favorite', props.item.id);
     }
 
-    return { isFav, onClick, onContextMenu, onFavClick };
+    return { isFav, syncBadge, syncTitle, onClick, onContextMenu, onFavClick };
   },
   template: `
     <div class="tc" @click="onClick" @contextmenu="onContextMenu">
       <div class="tc-thumb">
+        <div v-if="syncBadge" class="tc-sync" :class="'tc-sync-'+syncBadge" :title="syncTitle" aria-label="metadata sync" />
         <img v-if="item.thumb_url"
              :src="item.thumb_url"
              :alt="item.filename || ''"

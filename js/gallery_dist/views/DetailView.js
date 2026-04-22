@@ -32,14 +32,8 @@
 //         saves, onMounted restores).
 //       - Delete → stub button, lands in T19/T25.
 //
-// Deliberately NOT implemented (AI_RULES R1.2 / R1.3 / R6.5):
-//   * Tag editing + favorite toggle (FR-18) — that's T22's edit UI;
-//     we display these fields read-only for today.
-//   * Sync status badge — T22.
-//   * Keyboard shortcuts — not in FR-16..19; T22 may add focus
-//     reconciliation, but not left/right arrow nav for T14 alone.
-//   * Delete workflow — T19 (service.delete_image) + T25
-//     (ConfirmModal).
+// T22: Autocomplete tag edit + favorite PATCH + resync + WS (connection store).
+//   * Delete workflow / Move — still T25 / T24
 import {
   defineComponent, ref, computed, watch,
   onMounted, onBeforeUnmount, nextTick,
@@ -47,6 +41,8 @@ import {
 import * as api from '../api.js';
 import { apiQueryObject, filterState } from '../stores/filters.js';
 import { BASE_URL } from '../api.js';
+import { Autocomplete } from '../components/Autocomplete.js';
+import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 20;
@@ -54,6 +50,7 @@ const ZOOM_STEP = 1.25;
 
 export const DetailView = defineComponent({
   name: 'DetailView',
+  components: { Autocomplete },
   props: { id: { type: Number, required: true } },
   setup(props) {
     const loading = ref(true);
@@ -75,8 +72,26 @@ export const DetailView = defineComponent({
     const canvasRef = ref(null);
     const canvasSize = ref({ w: 0, h: 0 });
 
+    const tagDraft = ref(/** @type {string[]} */([]));
+    const tagInput = ref('');
+    const gallerySaving = ref(false);
+    const favSaving = ref(false);
+    const resyncing = ref(false);
+    let unsubEvent = null;
+    let unsubRecon = null;
+
     const copiedKey = ref(null);
     let copyTimer = null;
+
+    function syncTagDraft() {
+      const g = record.value && record.value.gallery;
+      if (!g || !Array.isArray(g.tags)) {
+        tagDraft.value = [];
+      } else {
+        tagDraft.value = g.tags.slice();
+      }
+      tagInput.value = '';
+    }
 
     async function fetchRecord(id) {
       loading.value = true;
@@ -84,10 +99,81 @@ export const DetailView = defineComponent({
       record.value = null;
       try {
         record.value = await api.get(`/image/${id}`);
+        syncTagDraft();
       } catch (exc) {
         error.value = exc;
       } finally {
         loading.value = false;
+      }
+    }
+
+    function onTagInput(v) { tagInput.value = v; }
+    function commitNewTag() {
+      const s = String(tagInput.value || '').split(',').map((x) => x.trim())
+        .filter(Boolean);
+      if (!s.length) return;
+      const set = new Set(tagDraft.value);
+      const out = tagDraft.value.slice();
+      for (const t of s) {
+        if (!set.has(t)) {
+          out.push(t);
+          set.add(t);
+        }
+      }
+      tagDraft.value = out;
+      tagInput.value = '';
+    }
+    function removeTag(idx) {
+      if (idx < 0 || idx >= tagDraft.value.length) return;
+      tagDraft.value = tagDraft.value.filter((_, i) => i !== idx);
+    }
+
+    async function applyTags() {
+      if (gallerySaving.value) return;
+      const id = props.id;
+      gallerySaving.value = true;
+      const prev = record.value;
+      try {
+        const out = await api.patch(`/image/${id}`, { tags: tagDraft.value.slice() });
+        record.value = out;
+        syncTagDraft();
+      } catch (e) {
+        if (prev) { record.value = prev; syncTagDraft(); }
+      } finally {
+        gallerySaving.value = false;
+      }
+    }
+
+    async function toggleFavorite() {
+      if (favSaving.value || !record.value) return;
+      const g = record.value.gallery || {};
+      const next = !g.favorite;
+      favSaving.value = true;
+      const prev = record.value;
+      const optimistic = { ...record.value, gallery: { ...g, favorite: next, sync_status: 'pending' } };
+      record.value = optimistic;
+      try {
+        record.value = await api.patch(`/image/${props.id}`, { favorite: next });
+        syncTagDraft();
+      } catch (e) {
+        record.value = prev;
+        syncTagDraft();
+      } finally {
+        favSaving.value = false;
+      }
+    }
+
+    async function doResync() {
+      if (resyncing.value || !record.value) return;
+      resyncing.value = true;
+      try {
+        const out = await api.post(`/image/${props.id}/resync`, {});
+        record.value = out;
+        syncTagDraft();
+      } catch (e) {
+        /* error stays in record; user can retry */
+      } finally {
+        resyncing.value = false;
       }
     }
 
@@ -259,9 +345,46 @@ export const DetailView = defineComponent({
           resizeObs.observe(canvasRef.value);
         }
       });
+      unsubRecon = subscribeReconcile(() => {
+        fetchRecord(props.id);
+        fetchNeighbors(props.id);
+      });
+      unsubEvent = subscribeGalleryEvent((env) => {
+        const t = env && env.type;
+        const d = (env && env.data) || {};
+        if (d.id != null && Number(d.id) !== Number(props.id)) return;
+        if (t === EV.DELETED) {
+          error.value = { code: 'not_found', message: 'Image was removed' };
+          record.value = null;
+          return;
+        }
+        if (t === EV.UPSERTED) {
+          fetchRecord(props.id);
+          return;
+        }
+        if (t === EV.UPDATED) {
+          if (!record.value) return;
+          const g = { ...record.value.gallery || {} };
+          if (d.version != null) g.version = d.version;
+          if (d.favorite !== undefined) g.favorite = d.favorite;
+          if (Array.isArray(d.tags)) g.tags = d.tags.slice();
+          record.value = { ...record.value, gallery: g };
+          syncTagDraft();
+          return;
+        }
+        if (t === EV.SYNC) {
+          if (!record.value) return;
+          const g = { ...record.value.gallery || {} };
+          if (d.sync_status != null) g.sync_status = d.sync_status;
+          if (d.version != null) g.version = d.version;
+          record.value = { ...record.value, gallery: g };
+        }
+      });
     });
 
     onBeforeUnmount(() => {
+      if (unsubEvent) { unsubEvent(); unsubEvent = null; }
+      if (unsubRecon) { unsubRecon(); unsubRecon = null; }
       if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
       if (copyTimer) { clearTimeout(copyTimer); copyTimer = null; }
     });
@@ -282,6 +405,13 @@ export const DetailView = defineComponent({
     const folder = computed(() => (record.value && record.value.folder) || {});
 
     const hasWorkflow = computed(() => !!meta.value.has_workflow);
+
+    const syncStatusBadge = computed(() => {
+      const s = gallery.value.sync_status;
+      if (s === 'pending') return 'pending';
+      if (s === 'failed') return 'failed';
+      return null;
+    });
     const rawDownloadUrl = computed(() =>
       record.value ? `${BASE_URL}/raw/${record.value.id}/download` : '#');
     const workflowUrl = computed(() =>
@@ -311,6 +441,9 @@ export const DetailView = defineComponent({
       scale, tx, ty, scalePct,
       canvasRef, imgStyle, copiedKey,
       hasWorkflow, rawDownloadUrl, workflowUrl,
+      syncStatusBadge,
+      tagDraft, tagInput, onTagInput, commitNewTag, removeTag, applyTags,
+      gallerySaving, toggleFavorite, doResync, favSaving, resyncing,
       onImgLoad,
       onPointerDown, onPointerMove, onPointerUp,
       fit, actualSize, zoomIn, zoomOut,
@@ -323,7 +456,14 @@ export const DetailView = defineComponent({
       <header class="dv-head">
         <a href="#/" class="dv-back">&larr; Back</a>
         <h2 class="dv-title">
-          <span v-if="record">#{{ record.id }} &mdash; {{ record.filename }}</span>
+          <span v-if="record" class="dv-title-row">
+            <span v-if="syncStatusBadge"
+                  class="tc-sync"
+                  :class="'tc-sync-'+syncStatusBadge"
+                  :title="syncStatusBadge==='pending' ? 'Metadata sync: pending' : 'Metadata sync: failed'"
+                  aria-label="metadata sync" />
+            #{{ record.id }} &mdash; {{ record.filename }}
+          </span>
           <span v-else-if="loading" class="muted">Loading…</span>
           <span v-else-if="error" class="error">
             {{ error.code || 'error' }}: {{ error.message }}
@@ -447,9 +587,40 @@ export const DetailView = defineComponent({
 
               <dt>Gallery</dt>
               <dd>
-                favorite: <code>{{ gallery.favorite ? 'yes' : 'no' }}</code>
-                <span class="muted"> · </span>
-                tags: <code>{{ (gallery.tags && gallery.tags.length) ? gallery.tags.join(', ') : '—' }}</code>
+                <div class="dv-favrow">
+                  <span class="muted">Favorite:</span>
+                  <button type="button"
+                          class="dv-fav"
+                          :class="{ active: gallery.favorite }"
+                          :aria-pressed="gallery.favorite ? 'true' : 'false'"
+                          :disabled="favSaving"
+                          :title="gallery.favorite ? 'Unfavorite' : 'Favorite'"
+                          @click="toggleFavorite">★</button>
+                </div>
+                <p v-if="syncStatusBadge==='failed' && record" class="dv-resync">
+                  <button type="button" class="dv-resync-btn" :disabled="resyncing" @click="doResync">
+                    {{ resyncing ? 'Retrying…' : 'Retry metadata sync' }}
+                  </button>
+                </p>
+                <p class="muted">Tags (T21 / T22)</p>
+                <ul class="dv-tags" v-if="tagDraft && tagDraft.length">
+                  <li v-for="(t, i) in tagDraft" :key="i" class="dv-tag">
+                    <code>{{ t }}</code>
+                    <button type="button" class="dv-tag-x" @click="removeTag(i)" :aria-label="'remove '+t">×</button>
+                  </li>
+                </ul>
+                <p v-else class="dv-tags-empty muted">No tags in draft (add below)</p>
+                <Autocomplete class="dv-tagac"
+                              fetch-kind="tags"
+                              placeholder="Type a tag, pick from list, Enter"
+                              :model-value="tagInput"
+                              @update:model-value="onTagInput"
+                              @commit="commitNewTag" />
+                <p class="dv-applyp">
+                  <button type="button" class="dv-apply" :disabled="gallerySaving" @click="applyTags">
+                    {{ gallerySaving ? 'Saving…' : 'Apply tags' }}
+                  </button>
+                </p>
               </dd>
             </template>
             <template v-else-if="loading">

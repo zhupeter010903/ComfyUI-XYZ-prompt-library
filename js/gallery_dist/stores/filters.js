@@ -18,8 +18,8 @@
 // Not implemented here (by task boundary):
 //   * Sort dropdown UI (FR-9b) — that's T13; we still carry SortSpec in
 //     the store so T13 can swap it in without re-plumbing persistence.
-//   * Autocomplete / vocab-normalised prompt tokens (FR-3b/c) — T21.
-//     Prompt/tag lists remain raw user tokens, comma-separated on input.
+//   * T21: wire still carries raw comma-split tokens; HTTP layer normalises
+//     via ``vocab.*`` before SQL (see ``routes._parse_filter``).
 import { reactive, watch } from 'vue';
 
 const STORAGE_KEY = 'xyz_gallery.filters.v1';

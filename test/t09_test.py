@@ -104,7 +104,7 @@ def _seed_fixture(db_path: Path) -> dict:
             conn, path="/scratch/output/flat_a.png", folder_id=out_root,
             relative_path="flat_a.png", filename="flat_a.png",
             file_size=100, mtime_ns=1_000_000_000_000_000, created_at=100,
-            model="sdxl", positive_prompt="a cat sitting on a mat",
+            model="sdxl", positive_prompt="cat, sitting, mat",
             favorite=1, tags_csv="cat,cute", workflow_present=1)
         img_ids["out_flat_2"] = _insert_image(
             conn, path="/scratch/output/flat_b.png", folder_id=out_root,
@@ -152,7 +152,7 @@ def _seed_fixture(db_path: Path) -> dict:
             conn, path="/scratch/input/cats/fluffy.png", folder_id=inp_root,
             relative_path="cats/fluffy.png", filename="fluffy.png",
             file_size=20, mtime_ns=5_500_000_000_000_000, created_at=60,
-            model="sdxl", positive_prompt="a cat sitting alone",
+            model="sdxl", positive_prompt="cat, sitting, alone",
             favorite=0, tags_csv="cat,fluffy", workflow_present=0)
         conn.commit()
     finally:
@@ -163,6 +163,36 @@ def _seed_fixture(db_path: Path) -> dict:
         "out_a": out_a, "out_b": out_b, "inp_a": inp_a,
         "img_ids": img_ids,
     }
+
+
+def _seed_vocab_links(db_path: Path) -> None:
+    """Backfill ``image_tag`` / ``image_prompt_token`` like the T15 indexer."""
+    from gallery import db, vocab
+    from gallery.repo import UpsertVocabAndLinksOp
+
+    conn = db.connect_write(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, tags_csv, positive_prompt FROM image",
+        ).fetchall()
+        for row in rows:
+            iid = int(row[0])
+            tags_csv = row[1]
+            pp = row[2]
+            tag_names: list[str] = []
+            for part in (tags_csv or "").split(","):
+                nt = vocab.normalize_tag(part)
+                if nt:
+                    tag_names.append(nt)
+            prompt_toks = list(vocab.normalize_prompt(pp or "", frozenset()))
+            UpsertVocabAndLinksOp(
+                image_id=iid,
+                prompt_tokens=prompt_toks,
+                tag_names=tag_names,
+            ).apply(conn)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ---- tests ---------------------------------------------------------------
@@ -544,6 +574,7 @@ def main() -> None:
     try:
         db_path = _bootstrap(scratch)
         ref = _seed_fixture(db_path)
+        _seed_vocab_links(db_path)
 
         test_get_image(db_path, ref)
         test_list_basic_and_pagination(db_path, ref)
