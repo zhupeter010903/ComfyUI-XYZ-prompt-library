@@ -8,3 +8,7 @@ gallery_data/
 # Secrets / local env (if you add API keys later)
 .env
 .env.*
+
+# User prompt library presets (personal — keep locally only)
+prompt_library/*
+!prompt_library/.gitkeep
