@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .vscode/
+
+# Local gallery index (SQLite WAL, thumbs, config with folder roots — do not publish)
+gallery_data/
+
+# Secrets / local env (if you add API keys later)
+.env
+.env.*

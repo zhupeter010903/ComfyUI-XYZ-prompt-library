@@ -1,5 +1,4 @@
 from .node import *
-from .grouped_prompt_node import GroupedPromptNode
 from .prompt_library_node import PromptLibraryNode
 
 import os
@@ -13,77 +12,11 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Multi Clip Encoder": MultiClipEncoder,
     "XYZ Multi Text Replace": MutiTextReplace,
     "XYZ Random String Picker": RandomStringPicker,
-    # "XYZ Group Prompt Toggle": GroupedPromptToggle,
-    "XYZ Grouped Prompts": GroupedPromptNode,
     "XYZ Prompt Library": PromptLibraryNode,
 }
 
 WEB_DIRECTORY = "./js"
 __all__ = ["NODE_CLASS_MAPPINGS", "WEB_DIRECTORY"]
-
-
-def _template_dir():
-    return os.path.join(os.path.dirname(__file__), "prompt_group_template")
-
-
-def _ensure_template_dir():
-    os.makedirs(_template_dir(), exist_ok=True)
-
-
-@PromptServer.instance.routes.get("/xyz/grouped_prompt/templates")
-async def xyz_list_templates(request):
-    try:
-        _ensure_template_dir()
-        names = []
-        for filename in os.listdir(_template_dir()):
-            if filename.endswith(".json"):
-                names.append(filename[:-5])
-        return web.json_response({"templates": sorted(names)})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
-
-
-@PromptServer.instance.routes.get("/xyz/grouped_prompt/template/{name}")
-async def xyz_get_template(request):
-    name = request.match_info.get("name", "").strip()
-    if not name:
-        return web.json_response({"error": "missing name"}, status=400)
-    try:
-        _ensure_template_dir()
-        filepath = os.path.join(_template_dir(), f"{name}.json")
-        if not os.path.exists(filepath):
-            return web.json_response({"error": "not found"}, status=404)
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return web.json_response(data)
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
-
-
-@PromptServer.instance.routes.post("/xyz/grouped_prompt/template")
-async def xyz_save_template(request):
-    try:
-        payload = await request.json()
-        name = (payload.get("name") or "").strip()
-        data = payload.get("data")
-        if not name or data is None:
-            return web.json_response({"error": "missing name or data"}, status=400)
-
-        override = False
-        q = request.rel_url.query
-        if "override" in q:
-            override = q.get("override", "false").lower() in ("true", "1", "yes")
-
-        _ensure_template_dir()
-        filepath = os.path.join(_template_dir(), f"{name}.json")
-        if os.path.exists(filepath) and not override:
-            return web.json_response({"error": "exists"}, status=409)
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        return web.json_response({"ok": True})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
 
 
 # Prompt Library API routes
@@ -313,3 +246,11 @@ async def xyz_delete_prompt_library_entry(request):
         return web.json_response({"error": "entry not found"}, status=404)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+try:
+    from . import gallery as _xyz_gallery
+    _xyz_gallery.setup(PromptServer.instance.app)
+except Exception as _xyz_gallery_err:
+    print(f"[XYZ Gallery] setup failed, continuing without gallery: {_xyz_gallery_err!r}")
+

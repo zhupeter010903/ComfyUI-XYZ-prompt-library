@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XYZ Image Gallery</title>
+  <style>
+    :root {
+      --bg: #1a1a1a; --panel: #252525; --fg: #e0e0e0;
+      --muted: #8a8a8a; --accent: #4a9eff; --error: #ff6b6b;
+      --border: #333;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    /* T13 correction — pin #app to the viewport height so .content
+       becomes a real scroll container (flex: 1 + min-height: 0). Before
+       this, #app was min-height:100% → whenever any descendant grew
+       taller than the viewport (e.g. T13's .vg-spacer at 30 000+ px),
+       the **document itself** scrolled instead of .content, which in
+       turn meant .vg never overflowed, its IntersectionObserver root
+       was the whole content, and load-more never re-fired. */
+    #app { display: flex; flex-direction: column; height: 100%; }
+    .topbar {
+      display: flex; align-items: center; gap: 14px;
+      padding: 10px 20px; background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .topbar a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    .topbar .muted { color: var(--muted); font-size: 13px; }
+    .content { flex: 1 1 0; min-height: 0; overflow: auto; padding: 20px; }
+    .muted { color: var(--muted); }
+    .loading { color: var(--muted); }
+    .error {
+      color: var(--error);
+      background: rgba(255, 107, 107, 0.08);
+      padding: 10px 14px; border-radius: 6px;
+      border: 1px solid rgba(255, 107, 107, 0.3);
+    }
+    dl dt { color: var(--muted); font-size: 12px;
+            text-transform: uppercase; margin-top: 12px; letter-spacing: .5px; }
+    dl dd { margin: 2px 0 0; font-size: 16px; }
+    pre { background: var(--panel); padding: 14px; border-radius: 6px;
+          overflow: auto; font-size: 12px; line-height: 1.45;
+          max-height: 600px; }
+    code { background: var(--panel); padding: 2px 6px; border-radius: 3px; }
+    img.thumb-preview { max-width: 320px; border-radius: 6px;
+                        margin: 12px 0; border: 1px solid var(--border); }
+
+    /* T12 — MainView layout + filter panel + folder tree. */
+    .mv { display: grid; grid-template-columns: 280px 1fr; gap: 16px;
+          align-items: start; }
+    .mv-sidebar { background: var(--panel); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 12px; position: sticky; top: 0;
+                  max-height: calc(100vh - 80px); overflow: auto; }
+    .mv-main { min-width: 0; }
+    .mv-sec-head { display: flex; align-items: center; justify-content: space-between;
+                   gap: 8px; margin-bottom: 6px; }
+    .mv-collapse { background: transparent; color: var(--fg); border: 0;
+                   cursor: pointer; font-weight: 600; font-size: 13px;
+                   padding: 4px 0; }
+    .mv-chevron { display: inline-block; width: 14px; color: var(--muted); }
+    .mv-reset { background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+                border-radius: 4px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
+    .mv-reset:disabled { opacity: 0.4; cursor: default; }
+    .mv-filters-body { display: flex; flex-direction: column; gap: 8px;
+                       margin-bottom: 14px; }
+    .mv-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px;
+                color: var(--muted); }
+    .mv-field > span { letter-spacing: .3px; }
+    .mv-field input[type=text], .mv-field select, .mv-field input[type=date] {
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+      border-radius: 4px; padding: 5px 7px; font-size: 13px; width: 100%;
+      box-sizing: border-box;
+    }
+    .mv-date { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; }
+    .mv-date legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+    .mv-date-row { display: flex; align-items: center; gap: 6px;
+                   font-size: 12px; color: var(--fg); margin: 2px 0; }
+    .mv-date-row input[type=date] { flex: 1; }
+
+    .mv-folders { border-top: 1px solid var(--border); padding-top: 10px; }
+    .mv-folders h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase;
+                     letter-spacing: .5px; color: var(--muted); font-weight: 600; }
+    .ft-toolbar { margin-bottom: 6px; }
+    .ft-recursive { background: var(--bg); color: var(--fg);
+                    border: 1px solid var(--border); border-radius: 4px;
+                    padding: 3px 8px; font-size: 12px; cursor: pointer; }
+    .ft-recursive[aria-pressed="true"] { background: var(--accent); color: #fff;
+                                         border-color: var(--accent); }
+    .ft-list { list-style: none; margin: 0; padding: 0; }
+    .ft-row { margin: 0; }
+    .ft-node { display: block; padding: 3px 6px; color: var(--fg);
+               text-decoration: none; font-size: 13px; border-radius: 3px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ft-node:hover { background: rgba(74, 158, 255, 0.08); }
+    .ft-node.active { background: var(--accent); color: #fff; }
+    .ft-kind { color: var(--muted); font-size: 11px; margin-right: 4px; }
+    .ft-node.active .ft-kind { color: rgba(255,255,255,0.75); }
+    .ft-count { font-size: 11px; margin-left: 4px; }
+    .ft-node.active .ft-count { color: rgba(255,255,255,0.8); }
+    .ft-all { font-style: italic; }
+
+    .mv-main-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+                    padding: 6px 0 12px; border-bottom: 1px solid var(--border);
+                    margin-bottom: 12px; font-size: 13px; }
+    .mv-main-head .mv-count strong { font-size: 16px; }
+    .mv-sep { opacity: 0.6; }
+    .mv-preview { list-style: none; margin: 0; padding: 0;
+                  display: flex; flex-direction: column; gap: 4px; }
+    .mv-preview li { font-size: 13px; padding: 4px 6px; border-radius: 3px; }
+    .mv-preview li:hover { background: rgba(255,255,255,0.03); }
+    .mv-preview a { color: var(--fg); text-decoration: none; }
+    .mv-preview a:hover { color: var(--accent); text-decoration: underline; }
+    .mv-note { font-size: 12px; margin-top: 14px; }
+
+    /* T13 — toolbar (cards-per-row slider + sort dropdown),
+       VirtualGrid, ThumbCard, context menu. */
+    .mv-toolbar { display: flex; flex-wrap: wrap; gap: 18px;
+                  align-items: center; margin-bottom: 10px;
+                  padding: 6px 0; }
+    .mv-toolbar label { display: flex; align-items: center; gap: 8px;
+                        font-size: 12px; }
+    .mv-cpr input[type=range] { width: 160px; accent-color: var(--accent); }
+    .mv-cpr-val { color: var(--fg); font-variant-numeric: tabular-nums;
+                  min-width: 2ch; text-align: right; }
+    .mv-sort select { background: var(--bg); color: var(--fg);
+                      border: 1px solid var(--border); border-radius: 4px;
+                      padding: 4px 6px; font-size: 13px; }
+
+    .vg { position: relative; width: 100%;
+          height: calc(100vh - 200px);
+          min-height: 320px;
+          overflow-y: auto; overflow-x: hidden;
+          background: var(--bg); border: 1px solid var(--border);
+          border-radius: 6px; }
+    .vg-spacer { position: relative; width: 100%; }
+    .vg-window { position: absolute; top: 0; left: 0; right: 0;
+                 display: grid; gap: 0;
+                 will-change: transform; }
+    .vg-sentinel { position: absolute; left: 0; right: 0; height: 1px;
+                   pointer-events: none; }
+    .vg-hint { position: sticky; bottom: 0; left: 0; right: 0;
+               padding: 6px 10px; font-size: 12px;
+               background: rgba(0,0,0,0.35); backdrop-filter: blur(4px);
+               border-top: 1px solid var(--border); }
+
+    .tc { position: relative; padding: 4px; cursor: pointer;
+          user-select: none; display: flex; flex-direction: column;
+          min-width: 0; }
+    .tc-thumb { position: relative; width: 100%;
+                aspect-ratio: 1 / 1;
+                background: var(--panel);
+                border: 1px solid var(--border); border-radius: 4px;
+                overflow: hidden; }
+    .tc-thumb img { width: 100%; height: 100%; object-fit: cover;
+                    display: block; }
+    .tc-thumb-empty { width: 100%; height: 100%; background: var(--panel); }
+    .tc-fav { position: absolute; top: 4px; right: 4px;
+              width: 22px; height: 22px; padding: 0;
+              display: inline-flex; align-items: center; justify-content: center;
+              background: rgba(0,0,0,0.55); color: #bbb;
+              border: 0; border-radius: 50%;
+              cursor: pointer; font-size: 14px; line-height: 1; }
+    .tc-fav:hover { color: #fff; }
+    .tc-fav.active { color: #ffce4d; }
+    .tc-name { margin-top: 4px; font-size: 11px; color: var(--fg);
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tc:hover .tc-thumb { border-color: var(--accent); }
+
+    .mv-ctx { position: fixed; z-index: 500;
+              background: var(--panel); color: var(--fg);
+              border: 1px solid var(--border); border-radius: 5px;
+              padding: 4px 0; min-width: 160px;
+              box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+              display: flex; flex-direction: column; }
+    .mv-ctx button { background: transparent; color: inherit; border: 0;
+                     text-align: left; padding: 6px 12px; cursor: pointer;
+                     font-size: 13px; }
+    .mv-ctx button:hover:not(:disabled) { background: rgba(74,158,255,0.15); }
+    .mv-ctx button:disabled { color: var(--muted); cursor: default; }
+
+    /* T14 — DetailView: 2-pane layout, zoom canvas, metadata list,
+       action buttons, copy feedback. */
+    .dv { display: flex; flex-direction: column; height: 100%;
+          min-height: 0; gap: 10px; }
+    .dv-head { display: flex; flex-wrap: wrap; align-items: center;
+               gap: 12px; padding-bottom: 8px;
+               border-bottom: 1px solid var(--border); }
+    .dv-back { color: var(--accent); text-decoration: none; font-size: 13px; }
+    .dv-back:hover { text-decoration: underline; }
+    .dv-title { margin: 0; font-size: 15px; font-weight: 500;
+                flex: 1; min-width: 0;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dv-nav { display: flex; gap: 6px; }
+    .dv-nav-btn { background: var(--panel); color: var(--fg);
+                  border: 1px solid var(--border); border-radius: 4px;
+                  padding: 5px 10px; font-size: 13px; cursor: pointer; }
+    .dv-nav-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .dv-nav-btn:disabled { opacity: 0.45; cursor: default; }
+
+    .dv-body { display: grid; grid-template-columns: 1fr 360px;
+               gap: 14px; flex: 1 1 0; min-height: 0; }
+    .dv-left { display: flex; flex-direction: column; gap: 8px;
+               min-width: 0; min-height: 0; }
+    .dv-canvas {
+      flex: 1 1 0; min-height: 320px;
+      background: #0a0a0a; border: 1px solid var(--border);
+      border-radius: 6px; position: relative; overflow: hidden;
+      touch-action: none; user-select: none;
+    }
+    .dv-canvas-hint { position: absolute; top: 50%; left: 50%;
+                      transform: translate(-50%, -50%); font-size: 13px; }
+    .dv-img { position: absolute; left: 50%; top: 50%;
+              max-width: none; max-height: none;
+              image-rendering: -webkit-optimize-contrast;
+              will-change: transform; }
+    .dv-zoom { display: flex; align-items: center; gap: 6px;
+               font-size: 13px; flex-wrap: wrap; }
+    .dv-zoom button {
+      background: var(--panel); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 4px 10px; font-size: 13px; cursor: pointer;
+      min-width: 38px;
+    }
+    .dv-zoom button:hover { border-color: var(--accent); color: var(--accent); }
+    .dv-zoom-pct { font-variant-numeric: tabular-nums; min-width: 4ch;
+                   text-align: right; }
+
+    .dv-right { background: var(--panel); border: 1px solid var(--border);
+                border-radius: 6px; padding: 12px; overflow: auto;
+                min-height: 0; }
+    .dv-sec { margin: 0 0 10px; font-size: 12px;
+              text-transform: uppercase; letter-spacing: .5px;
+              color: var(--muted); font-weight: 600; }
+    .dv-meta { margin: 0; }
+    .dv-meta dt { color: var(--muted); font-size: 11px;
+                  text-transform: uppercase; letter-spacing: .4px;
+                  margin-top: 12px; display: flex; align-items: center;
+                  gap: 8px; justify-content: space-between; }
+    .dv-meta dd { margin: 3px 0 0; font-size: 13px; word-break: break-word; }
+    .dv-meta code { font-size: 12px; }
+    .dv-prompt { margin: 4px 0 0; font-size: 12px;
+                 background: var(--bg); border: 1px solid var(--border);
+                 border-radius: 4px; padding: 8px 10px;
+                 max-height: 200px; overflow: auto; white-space: pre-wrap;
+                 word-break: break-word; }
+    .dv-bytes { font-size: 11px; margin-left: 6px; }
+    .dv-copy { background: transparent; color: var(--accent);
+               border: 1px solid var(--border); border-radius: 3px;
+               padding: 1px 6px; font-size: 10px; cursor: pointer;
+               letter-spacing: .3px; }
+    .dv-copy:hover:not(:disabled) { background: rgba(74,158,255,0.1); }
+    .dv-copy:disabled { opacity: 0.35; cursor: default; }
+
+    .dv-actions { display: flex; flex-wrap: wrap; gap: 6px;
+                  margin-top: 16px; padding-top: 12px;
+                  border-top: 1px solid var(--border); }
+    .dv-btn {
+      background: var(--panel); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 12px; font-size: 12px; cursor: pointer;
+      text-decoration: none; display: inline-flex; align-items: center;
+      gap: 4px;
+    }
+    .dv-btn:hover:not(:disabled):not(.dv-btn-disabled) {
+      border-color: var(--accent); color: var(--accent);
+    }
+    .dv-btn-disabled,
+    .dv-btn[aria-disabled="true"] {
+      opacity: 0.4; cursor: default; pointer-events: none;
+    }
+    .dv-btn:disabled { opacity: 0.4; cursor: default; }
+    .dv-btn-danger { border-color: rgba(255, 107, 107, 0.4); }
+    .dv-btn-danger:not(:disabled):hover { color: var(--error); border-color: var(--error); }
+
+    .dv-error { margin-top: 12px; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "vue": "https://cdn.jsdelivr.net/npm/vue@3.4.27/dist/vue.esm-browser.prod.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/xyz/gallery/static/app.js"></script>
+</body>
+</html>
