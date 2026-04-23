@@ -220,6 +220,129 @@
     .mv-sort select { background: var(--bg); color: var(--fg);
                       border: 1px solid var(--border); border-radius: 4px;
                       padding: 4px 6px; font-size: 13px; }
+    .mv-bulk { display: flex; align-items: center; gap: 6px; font-size: 12px;
+               cursor: pointer; user-select: none; }
+    .mv-bulk input { cursor: pointer; }
+
+    /* T23 — bulk bar + thumb checkbox (visual) */
+    .bb { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px 0;
+          padding: 10px 12px; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 6px; }
+    .bb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+    .bb-mode { font-size: 12px; }
+    .bb-count { font-size: 12px; padding-left: 8px; }
+    .bb-count-num { color: var(--fg); font-variant-numeric: tabular-nums; }
+    .bb-btn { background: var(--bg); color: var(--fg);
+              border: 1px solid var(--border); border-radius: 4px;
+              padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    .bb-btn:disabled { opacity: 0.5; cursor: default; }
+    .bb-btn.primary { background: var(--accent); color: #111; border-color: transparent; }
+    .bb-btn-danger { border-color: #c44 !important; color: #f8a8a8; }
+    .bb-in { min-width: 120px; flex: 1 1 120px; max-width: 240px; padding: 4px 8px;
+            font-size: 12px; background: var(--bg); color: var(--fg);
+            border: 1px solid var(--border); border-radius: 4px; }
+    .bb-ac { min-width: 120px; flex: 1 1 120px; max-width: 240px; }
+    .bb-ac .ac-input { width: 100%; box-sizing: border-box; padding: 4px 8px;
+            font-size: 12px; background: var(--bg); color: var(--fg);
+            border: 1px solid var(--border); border-radius: 4px; }
+    .bb-prog { font-size: 11px; color: var(--muted); }
+    .bb-prog-bar { height: 4px; background: rgba(255,255,255,0.08);
+                   border-radius: 2px; max-width: 360px; margin-top: 4px; }
+    .bb-prog-fill { height: 100%; background: var(--accent);
+                     border-radius: 2px; min-width: 0; }
+    .bb-err { font-size: 12px; }
+    /* T24 — MovePicker modal */
+    .mp-overlay {
+      position: fixed; inset: 0; z-index: 80;
+      background: rgba(0,0,0,0.45);
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+    }
+    .mp-panel {
+      width: min(720px, 100%);
+      max-height: min(86vh, 900px);
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.35);
+    }
+    .mp-head { display: flex; align-items: center; justify-content: space-between;
+               padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .mp-title { margin: 0; font-size: 16px; }
+    .mp-x { background: transparent; border: 0; color: var(--fg);
+            font-size: 22px; line-height: 1; cursor: pointer; padding: 4px 8px; }
+    .mp-body { padding: 12px 14px 16px; }
+    .mp-hint { margin: 0 0 10px; font-size: 12px; }
+    .mp-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px;
+                color: var(--muted); margin-bottom: 10px; }
+    .mp-field select {
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 8px; font-size: 13px;
+    }
+    .mp-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+    .mp-btn {
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 5px 12px; font-size: 12px; cursor: pointer;
+    }
+    .mp-btn.primary { background: var(--accent); color: #111; border-color: transparent; }
+    .mp-btn:disabled { opacity: 0.45; cursor: default; }
+    .mp-err { margin-top: 8px; font-size: 12px; }
+    .mp-table-wrap { overflow: auto; max-height: 48vh; margin-top: 8px;
+                     border: 1px solid var(--border); border-radius: 4px; }
+    .mp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .mp-table th, .mp-table td {
+      border-bottom: 1px solid var(--border); padding: 6px 8px;
+      text-align: left; vertical-align: top;
+    }
+    .mp-table th { color: var(--muted); font-weight: 600; }
+    .mp-td-id { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .mp-td-dst code { font-size: 11px; word-break: break-all; }
+    .mp-in {
+      width: 100%; max-width: 220px; box-sizing: border-box;
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px;
+      font-size: 12px;
+    }
+    /* T25 — ConfirmModal */
+    .cm-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+    }
+    .cm-panel {
+      width: min(480px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+    }
+    .cm-head { display: flex; align-items: center; justify-content: space-between;
+               padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .cm-title { margin: 0; font-size: 16px; }
+    .cm-x { background: transparent; border: 0; color: var(--fg);
+            font-size: 22px; line-height: 1; cursor: pointer; padding: 4px 8px; }
+    .cm-body { padding: 12px 14px 8px; }
+    .cm-line { margin: 0 0 8px; font-size: 13px; line-height: 1.45; }
+    .cm-foot { display: flex; justify-content: flex-end; gap: 8px;
+                padding: 10px 14px 14px; border-top: 1px solid var(--border); }
+    .cm-btn {
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 5px 12px; font-size: 12px; cursor: pointer;
+    }
+    .cm-btn:disabled { opacity: 0.45; cursor: default; }
+    .cm-btn-danger { background: #722; color: #fff; border-color: #944; }
+    .dv-del-err { margin: 8px 12px 0; font-size: 13px; }
+    /* T23: checkbox top-left *inside* thumb; sync nudges right when both show */
+    .tc-bulk { position: absolute; left: 2px; top: 2px; z-index: 2; padding: 0;
+                pointer-events: none; }
+    .tc-bulk-cb { width: 16px; height: 16px; cursor: default; margin: 0;
+                   pointer-events: auto; }
+    .tc-bulk-on .tc-thumb { outline: 1px solid rgba(74,158,255,0.35); }
 
     .vg { position: relative; width: 100%;
           height: calc(100vh - 200px);
@@ -246,10 +369,11 @@
                 background: var(--panel);
                 border: 1px solid var(--border); border-radius: 4px;
                 overflow: hidden; }
+    .tc-media { position: relative; z-index: 0; }
     .tc-thumb img { width: 100%; height: 100%; object-fit: cover;
                     display: block; }
     .tc-thumb-empty { width: 100%; height: 100%; background: var(--panel); }
-    .tc-fav { position: absolute; top: 4px; right: 4px;
+    .tc-fav { position: absolute; top: 4px; right: 4px; z-index: 2;
               width: 22px; height: 22px; padding: 0;
               display: inline-flex; align-items: center; justify-content: center;
               background: rgba(0,0,0,0.55); color: #bbb;
@@ -259,6 +383,8 @@
     .tc-fav.active { color: #ffce4d; }
     .tc-sync { position: absolute; top: 4px; left: 4px; width: 8px; height: 8px;
                border-radius: 50%; z-index: 2; box-shadow: 0 0 0 1px rgba(0,0,0,0.45); }
+    /* Bulk: 左上只放复选框；同步点顶行靠右、在收藏星左侧 (right:4 星宽~22) */
+    .tc-bulk-on .tc-thumb > .tc-sync { top: 4px; left: auto; right: 30px; }
     .tc-sync-pending { background: #e4b000; }
     .tc-sync-failed { background: #e33; }
     .tc-name { margin-top: 4px; font-size: 11px; color: var(--fg);

@@ -26,6 +26,9 @@ def _ensure_data_layout() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     THUMBS_DIR.mkdir(parents=True, exist_ok=True)
     DB_PATH.touch(exist_ok=True)
+    from . import audit as _audit
+
+    _audit.configure(data_dir=DATA_DIR)
 
 
 def start_background_services() -> None:
@@ -54,6 +57,7 @@ def stop_background_services() -> None:
     from . import metadata_sync as _metadata_sync
     _metadata_sync.stop_metadata_sync_worker()
     from . import watcher as _watcher
+    _watcher.stop_heartbeat()
     _watcher.stop_file_watchers()
     from . import thumbs as _thumbs
     _thumbs.stop_touch_flusher()
@@ -99,6 +103,7 @@ def setup(app=None) -> None:
         )
         from . import watcher as _watcher
         _watcher.start_file_watchers(db_path=DB_PATH, write_queue=_write_queue)
+        _watcher.start_heartbeat(db_path=DB_PATH, write_queue=_write_queue)
         _initialized = True
         logger.info("XYZ Gallery initialized (data dir: %s)", DATA_DIR)
 

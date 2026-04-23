@@ -13,6 +13,26 @@
 //     (T22). buildGalleryWebSocketUrl() is shared.
 
 const BASE = '/xyz/gallery';
+const CID_KEY = 'xyz_gallery_client_id';
+
+/** Stable per-tab id for T25 audit ``actor`` (HTTP + WS same browser). */
+export function getGalleryClientId() {
+  if (typeof sessionStorage === 'undefined') return '';
+  let v = sessionStorage.getItem(CID_KEY);
+  if (!v) {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      v = crypto.randomUUID();
+    } else {
+      v = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    }
+    try {
+      sessionStorage.setItem(CID_KEY, v);
+    } catch {
+      return v;
+    }
+  }
+  return v;
+}
 
 export class ApiError extends Error {
   constructor(status, code, message, details = null) {
@@ -44,10 +64,14 @@ function _buildQuery(query) {
 async function _request(method, path, { body, query, signal } = {}) {
   const url = BASE + path + _buildQuery(query);
   const init = { method, signal };
+  const headers = {};
+  const cid = getGalleryClientId();
+  if (cid) headers['X-XYZ-Gallery-Client-Id'] = cid;
   if (body !== undefined) {
-    init.headers = { 'Content-Type': 'application/json' };
+    headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
+  init.headers = headers;
   let resp;
   try {
     resp = await fetch(url, init);
@@ -148,5 +172,13 @@ export function openWS(handlers = {}) {
 export const BASE_URL = BASE;
 
 export default {
-  get, post, patch, delete: del, openWS, buildGalleryWebSocketUrl, ApiError, BASE_URL,
+  get,
+  post,
+  patch,
+  delete: del,
+  openWS,
+  buildGalleryWebSocketUrl,
+  getGalleryClientId,
+  ApiError,
+  BASE_URL,
 };

@@ -483,7 +483,59 @@ def delta_scan(
             errors += 1
             logger.exception("delta_scan index_one failed for %s", abs_path)
 
-    return {"walked": walked, "changed": changed, "errors": errors}
+    deleted_ids = _reconcile_missing_disk_rows(
+        root, db_path=db_path, write_queue=write_queue,
+    )
+    return {
+        "walked": walked,
+        "changed": changed,
+        "errors": errors,
+        "removed": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+    }
+
+
+def _reconcile_missing_disk_rows(
+    root: Dict[str, Any], *, db_path: _PathLike, write_queue,
+) -> List[int]:
+    """Drop DB rows under ``root`` whose files no longer exist (T25 heartbeat).
+
+    Uses the same ``delete_one`` path as the file watcher so in-flight
+    dedup + ``DeleteImageOp`` semantics stay unified.
+    """
+    root_id = int(root["id"])
+    root_path = os.path.normcase(os.path.normpath(str(root["path"])))
+    conn = _db.connect_read(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT path FROM image WHERE folder_id = ? ORDER BY id",
+            (root_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    deleted: List[int] = []
+    rds = root_path if (root_path.endswith(os.sep) or len(root_path) == 3) else (
+        root_path + os.sep
+    )
+    for (posix_path,) in rows:
+        p = str(posix_path)
+        try:
+            pc = os.path.normcase(os.path.normpath(p))
+            if not (pc == root_path or pc.startswith(rds)):
+                continue
+        except (OSError, TypeError, ValueError):
+            continue
+        if os.path.isfile(p):
+            continue
+        try:
+            iid = delete_one(p, db_path=db_path, write_queue=write_queue)
+        except Exception:
+            logger.exception("reconcile delete_one failed path=%r", p)
+            continue
+        if iid is not None:
+            deleted.append(int(iid))
+    return deleted
 
 
 # -- startup orchestration --------------------------------------------------

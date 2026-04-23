@@ -10,17 +10,15 @@
 //     pagination driven by next_cursor from /images;
 //   * ThumbCard instances inside the grid (loading=lazy etc. per
 //     SPEC §8.6);
-//   * a minimal right-click context menu stub for FR-14 so selection
-//     affordances are visible today while the real Move/Delete flows
-//     land in T24 / T25;
+//   * right-click context menu: Open detail, Move… (T24), Delete… (T25);
 //   * hash-router navigation to /image/:id on card left-click (FR-12 —
 //     detail view is T14, but the *trigger* is T13).
 //
 // Deliberately out of scope (AI_RULES R1.2 / R1.3 / R6.5):
-//   * Real bulk selection / checkbox overlay (T23).
+//   * Bulk selection / checkbox overlay (T23).
 //   * Real favorite PATCH (T19); we keep an optimistic local flip and
 //     emit intent that T19 will convert into an api.patch(/image/:id).
-//   * Timeline (FR-9c), Move/Delete modals.
+//   * Timeline (FR-9c).
 //   * T21: Autocomplete for prompt/tag filters + /vocab/models for model list.
 //   * T22: api.patch + WS (stores/connection.js) + /index/status focus
 //     reconciliation.
@@ -29,6 +27,9 @@ import * as api from '../api.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 import { FolderTree } from '../components/FolderTree.js';
 import { VirtualGrid } from '../components/VirtualGrid.js';
+import { BulkBar } from '../components/BulkBar.js';
+import { MovePicker } from '../components/MovePicker.js';
+import { ConfirmModal } from '../components/ConfirmModal.js';
 import { Autocomplete } from '../components/Autocomplete.js';
 import { ModelFilterPick } from '../components/ModelFilterPick.js';
 import {
@@ -36,8 +37,18 @@ import {
   apiQueryObject, resetFilter,
   layoutState, setCardsPerRow,
 } from '../stores/filters.js';
+import { toggleCardInSelection, resetSelection } from '../stores/selection.js';
+import { vocabCacheClear } from '../stores/vocab.js';
 
 const PAGE_SIZE = 120;
+
+function fmtBytesCtx(n) {
+  const x = Number(n) || 0;
+  if (x < 1024) return `${x} B`;
+  if (x < 1024 * 1024) return `${(x / 1024).toFixed(1)} KiB`;
+  if (x < 1024 * 1024 * 1024) return `${(x / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(x / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
 
 // T14 Back-button contract: sessionStorage holds the scroll position
 // (and the id the user opened) so DetailView → "#/" round-trips land
@@ -63,7 +74,10 @@ function _readPendingRestore() {
 
 export const MainView = defineComponent({
   name: 'MainView',
-  components: { FolderTree, VirtualGrid, Autocomplete, ModelFilterPick },
+  components: {
+    FolderTree, VirtualGrid, BulkBar, MovePicker, ConfirmModal,
+    Autocomplete, ModelFilterPick,
+  },
   setup() {
     const folders = ref([]);
     const foldersLoading = ref(true);
@@ -85,6 +99,12 @@ export const MainView = defineComponent({
     const nameInput = ref(filterState.filter.name || '');
 
     const contextMenu = ref({ open: false, x: 0, y: 0, id: null });
+    const movePickerOpen = ref(false);
+    const movePickerSel = ref(null);
+    const deleteCtxOpen = ref(false);
+    const deleteCtxId = ref(null);
+    const deleteCtxBusy = ref(false);
+    const deleteCtxErr = ref('');
 
     let nameTimer = null;
     let pendingAborter = null;
@@ -98,8 +118,12 @@ export const MainView = defineComponent({
     // (filter change) won't suddenly scroll back.
     let pendingScrollRestore = _readPendingRestore();
     // Highlight hint for the card we came back from (FR-19 "selection"
-    // restore). Real multi-select checkbox lands in T23.
+    // restore). T23 bulk checkbox overlay.
     const lastOpenedId = ref(pendingScrollRestore ? pendingScrollRestore.lastId : null);
+    const bulkMode = ref(false);
+    // Only increments on full first-page list replace (reset / filter) — not on favorite/WS
+    // patches — so VirtualGrid can scroll to top *only* then, never on in-place item edits.
+    const gridListGen = ref(0);
 
     async function fetchFolders() {
       foldersLoading.value = true;
@@ -161,6 +185,7 @@ export const MainView = defineComponent({
         if (signal.aborted || token !== fetchToken) return;
         const items = Array.isArray(page.items) ? page.items : [];
         images.value = items;
+        gridListGen.value += 1;
         nextCursor.value = page.next_cursor || null;
         hasMore.value = !!page.next_cursor;
         totalCount.value = typeof count.total === 'number' ? count.total : 0;
@@ -198,6 +223,45 @@ export const MainView = defineComponent({
       }
     }
 
+    /**
+     * Watcher re-indexes a file (favicon PATCH → metadata write → fs change) and
+     * broadcasts `image.upserted` — a full `resetAndFetch` would clear `images` and
+     * scroll to the top, so we only merge the single row.
+     */
+    async function mergeRowFromIndexUpsert(imageId) {
+      if (typeof imageId !== 'number') return;
+      const idx = images.value.findIndex((x) => x && x.id === imageId);
+      if (idx < 0) {
+        try {
+          const c = await api.get('/images/count', { query: apiQueryObject() });
+          if (c && typeof c.total === 'number') totalCount.value = c.total;
+        } catch { /* ignore */ }
+        return;
+      }
+      const row = images.value[idx];
+      try {
+        const rec = await api.get(`/image/${imageId}`);
+        if (!rec || typeof rec !== 'object') return;
+        Object.assign(row, rec);
+      } catch { /* 404/500 — leave list as-is */ }
+    }
+
+    function removeImageRowById(imageId) {
+      if (typeof imageId !== 'number') return;
+      const i = images.value.findIndex((x) => x && x.id === imageId);
+      if (i < 0) {
+        void (async () => {
+          try {
+            const c = await api.get('/images/count', { query: apiQueryObject() });
+            if (c && typeof c.total === 'number') totalCount.value = c.total;
+          } catch { /* ignore */ }
+        })();
+        return;
+      }
+      images.value.splice(i, 1);
+      if (totalCount.value > 0) totalCount.value -= 1;
+    }
+
     onMounted(() => {
       fetchFolders();
       fetchVocabModels();
@@ -209,32 +273,49 @@ export const MainView = defineComponent({
       unsubEvent = subscribeGalleryEvent((env) => {
         const t = env && env.type;
         const d = (env && env.data) || {};
-        if (t === EV.UPSERTED || t === EV.DELETED || t === EV.DRIFT) {
+        if (t === EV.DRIFT) {
           resetAndFetch();
+          return;
+        }
+        if (t === EV.UPSERTED) {
+          const iid = typeof d.id === 'number' ? d.id : Number(d.id);
+          if (Number.isFinite(iid)) {
+            void mergeRowFromIndexUpsert(iid);
+          }
+          return;
+        }
+        if (t === EV.DELETED) {
+          const iid = typeof d.id === 'number' ? d.id : Number(d.id);
+          if (Number.isFinite(iid)) {
+            removeImageRowById(iid);
+          }
           return;
         }
         if (t === EV.INDEX_PROGRESS) {
           return;
         }
         if (t === EV.UPDATED && typeof d.id === 'number') {
+          if (Array.isArray(d.tags)) vocabCacheClear();
+          if (d.moved_to) {
+            void mergeRowFromIndexUpsert(d.id);
+            return;
+          }
           const idx = images.value.findIndex((x) => x && x.id === d.id);
           if (idx < 0) return;
           const it = images.value[idx];
-          const g = { ...(it.gallery || {}) };
-          if (d.version != null) g.version = d.version;
-          if (d.favorite !== undefined) g.favorite = !!d.favorite;
-          if (Array.isArray(d.tags)) g.tags = d.tags.slice();
-          images.value.splice(idx, 1, { ...it, gallery: g });
+          if (!it.gallery) it.gallery = {};
+          if (d.version != null) it.gallery.version = d.version;
+          if (d.favorite !== undefined) it.gallery.favorite = !!d.favorite;
+          if (Array.isArray(d.tags)) it.gallery.tags = d.tags.slice();
           return;
         }
         if (t === EV.SYNC && typeof d.id === 'number') {
           const idx = images.value.findIndex((x) => x && x.id === d.id);
           if (idx < 0) return;
           const it = images.value[idx];
-          const g = { ...(it.gallery || {}), ...it.gallery };
-          if (d.sync_status != null) g.sync_status = d.sync_status;
-          if (d.version != null) g.version = d.version;
-          images.value.splice(idx, 1, { ...it, gallery: g });
+          if (!it.gallery) it.gallery = {};
+          if (d.sync_status != null) it.gallery.sync_status = d.sync_status;
+          if (d.version != null) it.gallery.version = d.version;
         }
       });
     });
@@ -255,6 +336,10 @@ export const MainView = defineComponent({
       () => JSON.stringify(apiQueryObject()),
       () => resetAndFetch(),
     );
+
+    watch(bulkMode, (on) => {
+      if (!on) resetSelection();
+    });
 
     function onNameInput(e) {
       nameInput.value = e.target.value;
@@ -290,6 +375,10 @@ export const MainView = defineComponent({
 
     function onSelectFolder(id) {
       filterState.filter.folder_id = id;
+    }
+
+    function onToggleBulk(id) {
+      toggleCardInSelection(id);
     }
     function onToggleRecursive(v) {
       filterState.filter.recursive = !!v;
@@ -366,8 +455,8 @@ export const MainView = defineComponent({
     }
 
     // Restore scroll once the first post-mount fetch lands. We run in
-    // nextTick so VirtualGrid's own items-change watcher (which resets
-    // scrollTop=0 when the first batch arrives) has already flushed.
+    // nextTick so VirtualGrid’s listGen watcher (which resets
+    // scrollTop=0 on a new first page) has already flushed.
     function _tryRestoreScroll() {
       if (!pendingScrollRestore) return;
       if (!images.value.length) return;
@@ -387,16 +476,21 @@ export const MainView = defineComponent({
       const it = images.value[idx];
       const cur = !!(it.gallery && it.gallery.favorite);
       const next = !cur;
-      const prev = { ...it, gallery: { ...(it.gallery || {}) } };
-      images.value.splice(idx, 1, {
-        ...it,
-        gallery: { ...(it.gallery || {}), favorite: next, sync_status: 'pending' },
-      });
+      const prevFav = cur;
+      const prevSync = it.gallery && it.gallery.sync_status;
+      if (!it.gallery) it.gallery = {};
+      it.gallery.favorite = next;
+      it.gallery.sync_status = 'pending';
       try {
-        const updated = await api.patch(`/image/${id}`, { favorite: next });
-        images.value.splice(idx, 1, updated);
+        const u = await api.patch(`/image/${id}`, { favorite: next });
+        if (u && u.gallery) {
+          Object.assign(it.gallery, u.gallery);
+        }
+        // Do not set thumb_url — ?v= changes reload the <img> and cause visible flash;
+        // favorite is DB-only and the raster thumb is unchanged.
       } catch (e) {
-        images.value.splice(idx, 1, prev);
+        it.gallery.favorite = prevFav;
+        it.gallery.sync_status = prevSync;
       }
     }
 
@@ -411,6 +505,69 @@ export const MainView = defineComponent({
       closeContextMenu();
       if (id != null) onOpenImage(id);
     }
+    function onCtxMove() {
+      const id = contextMenu.value.id;
+      closeContextMenu();
+      if (typeof id !== 'number') return;
+      movePickerSel.value = { mode: 'explicit', ids: [id] };
+      movePickerOpen.value = true;
+    }
+    function closeMovePicker() {
+      movePickerOpen.value = false;
+      movePickerSel.value = null;
+    }
+
+    const deleteCtxLines = computed(() => {
+      const id = deleteCtxId.value;
+      const err = deleteCtxErr.value;
+      if (id == null) return ['Delete this image?'];
+      const it = images.value.find((x) => x && x.id === id);
+      const head = !it
+        ? ['Permanently delete image #' + String(id) + '?']
+        : (() => {
+          const bytes = it.size && it.size.bytes != null ? it.size.bytes : 0;
+          return [
+            'Permanently delete "' + String(it.filename || '') + '" (#' + String(id) + ')?',
+            'Approx. size: ' + fmtBytesCtx(bytes) + ' — removed from disk and index.',
+          ];
+        })();
+      if (err) head.push('Error: ' + String(err));
+      return head;
+    });
+
+    function onCtxDelete() {
+      const id = contextMenu.value.id;
+      closeContextMenu();
+      if (typeof id !== 'number') return;
+      deleteCtxErr.value = '';
+      deleteCtxId.value = id;
+      deleteCtxOpen.value = true;
+    }
+
+    function closeDeleteCtx() {
+      if (!deleteCtxBusy.value) {
+        deleteCtxOpen.value = false;
+        deleteCtxId.value = null;
+        deleteCtxErr.value = '';
+      }
+    }
+
+    async function onDeleteCtxConfirmed() {
+      const id = deleteCtxId.value;
+      if (typeof id !== 'number') return;
+      deleteCtxErr.value = '';
+      deleteCtxBusy.value = true;
+      try {
+        await api.del(`/image/${id}`);
+        removeImageRowById(id);
+        deleteCtxOpen.value = false;
+        deleteCtxId.value = null;
+      } catch (e) {
+        deleteCtxErr.value = (e && e.message) ? String(e.message) : String(e);
+      } finally {
+        deleteCtxBusy.value = false;
+      }
+    }
 
     return {
       folders, foldersLoading, foldersError,
@@ -421,15 +578,18 @@ export const MainView = defineComponent({
       panelCollapsed, layoutState,
       promptInput, tagInput, nameInput,
       hasDateAfter, hasDateBefore,
-      contextMenu, SORT_OPTIONS, sortValue,
+      contextMenu, movePickerOpen, movePickerSel,
+      deleteCtxOpen, deleteCtxBusy, deleteCtxErr, deleteCtxLines,
+      onCtxDelete, closeDeleteCtx, onDeleteCtxConfirmed,
+      SORT_OPTIONS, sortValue,
       lastOpenedId,
       onNameInput, commitPromptTokens, commitTagTokens, setPromptInput, setTagInput,
       onToggleDateBound, onSelectFolder, onToggleRecursive,
       toggleCollapse, onResetClick,
       onCardsPerRowInput,
       onOpenImage, onToggleFavorite, onContext,
-      closeContextMenu, onCtxOpenDetail,
-      loadMore,
+      closeContextMenu, onCtxOpenDetail, onCtxMove, closeMovePicker,
+      loadMore, bulkMode, onToggleBulk, gridListGen,
     };
   },
   template: `
@@ -538,6 +698,11 @@ export const MainView = defineComponent({
         </header>
 
         <div class="mv-toolbar">
+          <label class="mv-bulk">
+            <input type="checkbox" v-model="bulkMode" />
+            <span>Bulk edit</span>
+          </label>
+          <span class="mv-sep muted">·</span>
           <label class="mv-cpr">
             <span class="muted">Thumbs per row</span>
             <input type="range"
@@ -553,19 +718,23 @@ export const MainView = defineComponent({
             </select>
           </label>
         </div>
+        <BulkBar v-if="bulkMode" @moved="resetAndFetch" />
 
         <div v-if="imagesError" class="error">
           <strong>{{ imagesError.code || 'error' }}</strong>: {{ imagesError.message }}
         </div>
         <VirtualGrid v-else
                      :items="images"
+                     :list-gen="gridListGen"
                      :cards-per-row="layoutState.cardsPerRow"
                      :total-estimate="totalCount"
                      :has-more="hasMore"
                      :loading="imagesLoading"
                      :loading-more="loadingMore"
+                     :bulk-mode="bulkMode"
                      @load-more="loadMore"
                      @open="onOpenImage"
+                     @toggle-bulk="onToggleBulk"
                      @toggle-favorite="onToggleFavorite"
                      @context="onContext" />
 
@@ -574,9 +743,24 @@ export const MainView = defineComponent({
              :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
              @click.stop>
           <button type="button" @click="onCtxOpenDetail">Open detail</button>
-          <button type="button" disabled title="Lands in T24">Move…</button>
-          <button type="button" disabled title="Lands in T25">Delete…</button>
+          <button type="button" @click="onCtxMove">Move…</button>
+          <button type="button" @click="onCtxDelete">Delete…</button>
         </div>
+        <ConfirmModal
+          v-if="deleteCtxOpen"
+          title="Delete image"
+          :lines="deleteCtxLines"
+          confirm-label="Delete"
+          cancel-label="Cancel"
+          :danger="true"
+          :busy="deleteCtxBusy"
+          @cancel="closeDeleteCtx"
+          @confirm="onDeleteCtxConfirmed"
+        />
+        <MovePicker v-if="movePickerOpen"
+                    :forced-selection="movePickerSel"
+                    @close="closeMovePicker"
+                    @done="resetAndFetch" />
       </section>
     </div>
   `,

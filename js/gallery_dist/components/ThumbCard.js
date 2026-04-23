@@ -14,8 +14,7 @@
 // * Favorite toggle is a stub: the real PATCH call lands in T19. We
 //   emit 'toggle-favorite' so the parent can patch local state today
 //   and swap in api.patch() later without re-plumbing the child.
-// * Right-click opens a placeholder context menu (FR-14 `Move…` /
-//   `Delete…`); the actual actions land in T24 / T25.
+// * Right-click → parent context menu (Move… T24, Delete… T25).
 // * T22: `gallery.sync_status` — pending=amber dot, failed=red dot, ok=hidden.
 import { defineComponent, computed } from 'vue';
 
@@ -23,8 +22,10 @@ export const ThumbCard = defineComponent({
   name: 'ThumbCard',
   props: {
     item: { type: Object, required: true },
+    bulkMode: { type: Boolean, default: false },
+    bulkSelected: { type: Boolean, default: false },
   },
-  emits: ['open', 'toggle-favorite', 'context'],
+  emits: ['open', 'toggle-favorite', 'context', 'toggle-bulk'],
   setup(props, { emit }) {
     const isFav = computed(
       () => !!(props.item && props.item.gallery && props.item.gallery.favorite),
@@ -42,6 +43,10 @@ export const ThumbCard = defineComponent({
     });
 
     function onClick() {
+      if (props.bulkMode) {
+        emit('toggle-bulk', props.item.id);
+        return;
+      }
       emit('open', props.item.id);
     }
     function onContextMenu(e) {
@@ -56,15 +61,25 @@ export const ThumbCard = defineComponent({
     return { isFav, syncBadge, syncTitle, onClick, onContextMenu, onFavClick };
   },
   template: `
-    <div class="tc" @click="onClick" @contextmenu="onContextMenu">
+    <div class="tc" :class="{ 'tc-bulk-on': bulkMode }" @click="onClick" @contextmenu="onContextMenu">
       <div class="tc-thumb">
-        <div v-if="syncBadge" class="tc-sync" :class="'tc-sync-'+syncBadge" :title="syncTitle" aria-label="metadata sync" />
         <img v-if="item.thumb_url"
+             class="tc-media"
              :src="item.thumb_url"
              :alt="item.filename || ''"
              loading="lazy"
              decoding="async" />
-        <div v-else class="tc-thumb-empty" aria-hidden="true"></div>
+        <div v-else class="tc-thumb-empty tc-media" aria-hidden="true"></div>
+        <div v-if="bulkMode" class="tc-bulk" aria-hidden="true">
+          <input
+            type="checkbox"
+            class="tc-bulk-cb"
+            :checked="bulkSelected"
+            tabindex="-1"
+            @click.stop
+          />
+        </div>
+        <div v-if="syncBadge" class="tc-sync" :class="'tc-sync-'+syncBadge" :title="syncTitle" aria-label="metadata sync" />
         <button type="button"
                 class="tc-fav"
                 :class="{ active: isFav }"

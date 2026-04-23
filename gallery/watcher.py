@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .repo import WriteQueue  # noqa: F401
@@ -24,9 +24,56 @@ __all__ = [
     "merge_watcher_state",
     "start_file_watchers",
     "stop_file_watchers",
+    "start_heartbeat",
+    "stop_heartbeat",
 ]
 
 _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+# ---- T25: coalescer counters (reset when heartbeat writes audit stats) ----
+
+_coalescer_events_seen: int = 0
+_coalescer_rows_flushed: int = 0
+
+
+def _note_coalescer_event() -> None:
+    global _coalescer_events_seen
+    _coalescer_events_seen += 1
+
+
+def _note_coalescer_flush(n: int) -> None:
+    global _coalescer_rows_flushed
+    _coalescer_rows_flushed += int(n)
+
+
+def snapshot_coalescer_stats_for_audit() -> Tuple[int, int]:
+    """Return ``(events_seen, rows_flushed)`` since last snapshot and zero both."""
+    global _coalescer_events_seen, _coalescer_rows_flushed
+    ev, rw = _coalescer_events_seen, _coalescer_rows_flushed
+    _coalescer_events_seen = 0
+    _coalescer_rows_flushed = 0
+    return ev, rw
+
+
+def _fan_out_delta_scan_result(root: Dict[str, Any], st: Dict[str, Any]) -> None:
+    """WS: deleted rows + optional drift envelope (T25)."""
+    from . import service as _service
+    from . import ws_hub as _ws_hub
+
+    for iid in st.get("deleted_ids") or []:
+        _service.broadcast_image_deleted(int(iid))
+    ch = int(st.get("changed", 0))
+    rm = int(st.get("removed", 0))
+    if ch > 0 or rm > 0:
+        _ws_hub.broadcast(
+            _ws_hub.INDEX_DRIFT_DETECTED,
+            {
+                "root_id": int(root["id"]),
+                "changed": ch,
+                "removed": rm,
+                "walked": int(st.get("walked", 0)),
+            },
+        )
 
 
 def _is_image_name(name: str) -> bool:
@@ -84,9 +131,10 @@ class _DeltaArmer:
         from . import indexer as _indexer
         while True:
             try:
-                _indexer.delta_scan(
+                st = _indexer.delta_scan(
                     self._root, db_path=self._db_path, write_queue=self._write_queue,
                 )
+                _fan_out_delta_scan_result(self._root, st)
             except Exception:
                 logger.exception("delta_scan failed (root_id=%s)", self._root.get("id"))
             with self._lock:
@@ -134,6 +182,7 @@ class Coalescer:
 
     def add(self, key: str, last_path: str, ev: str) -> None:
         """``ev`` ∈ ``'u'`` (upsert) 或 ``'d'`` (delete).  ``key``= indexer 去重 key。"""
+        _note_coalescer_event()
         do_overflow = False
         with self._lock:
             p = self._buf.get(key)
@@ -169,6 +218,8 @@ class Coalescer:
                 ]
                 for k, _ in to_flush:
                     self._buf.pop(k, None)
+            if to_flush:
+                _note_coalescer_flush(len(to_flush))
             for i in range(0, len(to_flush), self.FLUSH_MAX):
                 chunk = to_flush[i: i + self.FLUSH_MAX]
                 for _k, pend in chunk:
@@ -191,6 +242,96 @@ class Coalescer:
 _OBS: List[Any] = []
 _CLS: List[Coalescer] = []
 _WSTARTED: bool = False
+_HEARTBEAT: Optional["HeartbeatThread"] = None
+
+
+class HeartbeatThread:
+    """30 s light ``delta_scan`` per root + 5 min audit stats line (T25)."""
+
+    INTERVAL_S: float = 30.0
+    STATS_INTERVAL_S: float = 300.0
+
+    def __init__(self, *, db_path: Any, write_queue: Any) -> None:
+        self._db_path = db_path
+        self._write_queue = write_queue
+        self._stop = threading.Event()
+        self._thr: Optional[threading.Thread] = None
+        self._scans_done: int = 0
+        self._drifts_found: int = 0
+
+    def start(self) -> None:
+        if self._thr is not None and self._thr.is_alive():
+            return
+        self._stop.clear()
+        self._thr = threading.Thread(
+            target=self._loop, name="xyz-gallery-heartbeat", daemon=True,
+        )
+        self._thr.start()
+
+    def stop(self, *, timeout: float = 3.0) -> None:
+        self._stop.set()
+        if self._thr is not None:
+            self._thr.join(timeout=timeout)
+            self._thr = None
+
+    def _loop(self) -> None:
+        from . import audit as _audit
+        from . import folders as _folders
+        from . import indexer as _indexer
+        import time as _time
+
+        last_audit = _time.monotonic()
+        while not self._stop.wait(self.INTERVAL_S):
+            self._scans_done += 1
+            try:
+                roots = _folders.list_roots(db_path=self._db_path)
+            except Exception:
+                logger.exception("HeartbeatThread list_roots failed")
+                roots = []
+            for root in roots:
+                try:
+                    st = _indexer.delta_scan(
+                        root,
+                        db_path=self._db_path,
+                        write_queue=self._write_queue,
+                        mode="light",
+                    )
+                    _fan_out_delta_scan_result(root, st)
+                    if int(st.get("changed", 0)) + int(st.get("removed", 0)) > 0:
+                        self._drifts_found += 1
+                except Exception:
+                    logger.exception(
+                        "HeartbeatThread delta_scan root_id=%s",
+                        root.get("id"),
+                    )
+            now = _time.monotonic()
+            if now - last_audit >= self.STATS_INTERVAL_S:
+                last_audit = now
+                ev, co = snapshot_coalescer_stats_for_audit()
+                _audit.log_heartbeat_stats(
+                    events_seen=ev,
+                    rows_coalesced=co,
+                    scans_done=self._scans_done,
+                    drifts_found=self._drifts_found,
+                )
+
+
+def start_heartbeat(*, db_path: Any, write_queue: Any) -> None:
+    global _HEARTBEAT
+    if _HEARTBEAT is not None:
+        return
+    _HEARTBEAT = HeartbeatThread(db_path=db_path, write_queue=write_queue)
+    _HEARTBEAT.start()
+    logger.info("gallery HeartbeatThread started")
+
+
+def stop_heartbeat() -> None:
+    global _HEARTBEAT
+    if _HEARTBEAT is None:
+        return
+    _HEARTBEAT.stop()
+    _HEARTBEAT = None
+    logger.info("gallery HeartbeatThread stopped")
 
 
 def _in_root(path: str, root_path: str) -> bool:

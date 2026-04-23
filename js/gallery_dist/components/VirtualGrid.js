@@ -34,13 +34,14 @@
 // R1.3 / R6.5):
 //   * Timeline layout (FR-9c) — P2, T28+ scope.
 //   * LIFO viewport-priority thumbnail prefetch (T26).
-//   * Bulk-edit checkbox overlay (T23).
+//   * Bulk-edit checkbox overlay (T23) — see ThumbCard.
 //   * Focus reconciliation on window.onfocus (T22).
 import {
   defineComponent, ref, computed, watch,
   onMounted, onBeforeUnmount, nextTick,
 } from 'vue';
 import { ThumbCard } from './ThumbCard.js';
+import { isCardSelectedInBulk } from '../stores/selection.js';
 
 const NAME_LABEL_PX = 28;
 
@@ -49,13 +50,16 @@ export const VirtualGrid = defineComponent({
   components: { ThumbCard },
   props: {
     items: { type: Array, required: true },
+    /** Increments only when MainView replaces the first page (new query); not on PATCH/WS. */
+    listGen: { type: Number, default: 0 },
     cardsPerRow: { type: Number, default: 6 },
     totalEstimate: { type: Number, default: 0 },
     hasMore: { type: Boolean, default: false },
     loading: { type: Boolean, default: false },
     loadingMore: { type: Boolean, default: false },
+    bulkMode: { type: Boolean, default: false },
   },
-  emits: ['load-more', 'open', 'toggle-favorite', 'context'],
+  emits: ['load-more', 'open', 'toggle-favorite', 'context', 'toggle-bulk'],
   setup(props, { emit }) {
     const scroller = ref(null);
     const sentinel = ref(null);
@@ -183,25 +187,23 @@ export const VirtualGrid = defineComponent({
       if (intObs) intObs.disconnect();
     });
 
-    // When the items array is replaced (sort/filter change resets the
-    // first page), scroll back to top. Identity check uses the first
-    // element to avoid snap-to-top on a loadMore append.
+    // Only MainView’s `listGen` bumps on a *full first-page replace*
+    // (filter/sort reset) — not on in-place favorite / WS field patches, so
+    // scrollTop is never zeroed for those.
     watch(
-      () => props.items,
-      (newItems, oldItems) => {
+      () => props.listGen,
+      (n, p) => {
+        if (n === p) return;
         if (!scroller.value) return;
-        const newHead = (newItems && newItems[0]) || null;
-        const oldHead = (oldItems && oldItems[0]) || null;
-        if (newHead !== oldHead) {
-          scroller.value.scrollTop = 0;
-          scrollTop.value = 0;
-        }
-        // After each items change (append or reset), re-check whether
-        // the viewport still sits past the loaded tail. Critical for
-        // two chains: (1) scrollbar-drag to far position → fire load-more
-        // → new page lands → viewport still past new loadedBottom →
-        // fire again; (2) T14 Back-scroll restores scrollTop to a far
-        // position on the *first* post-mount fetch.
+        scroller.value.scrollTop = 0;
+        scrollTop.value = 0;
+        nextTick(() => maybeLoadMore());
+      },
+    );
+
+    watch(
+      () => (props.items || []).length,
+      () => {
         nextTick(() => maybeLoadMore());
       },
     );
@@ -211,13 +213,15 @@ export const VirtualGrid = defineComponent({
     function onOpen(id) { emit('open', id); }
     function onFav(id) { emit('toggle-favorite', id); }
     function onCtx(p) { emit('context', p); }
+    function onToggleBulk(id) { emit('toggle-bulk', id); }
 
     return {
       scroller, sentinel,
       cardWidth, rowHeight,
       totalHeight, loadedHeight, offsetY,
       visibleItems,
-      onScroll, onOpen, onFav, onCtx,
+      onScroll, onOpen, onFav, onCtx, onToggleBulk,
+      isCardSelectedInBulk,
     };
   },
   template: `
@@ -232,9 +236,12 @@ export const VirtualGrid = defineComponent({
           <ThumbCard v-for="it in visibleItems"
                      :key="it.id"
                      :item="it"
+                     :bulk-mode="bulkMode"
+                     :bulk-selected="isCardSelectedInBulk(it.id)"
                      @open="onOpen"
                      @toggle-favorite="onFav"
-                     @context="onCtx" />
+                     @context="onCtx"
+                     @toggle-bulk="onToggleBulk" />
         </div>
         <div ref="sentinel"
              class="vg-sentinel"

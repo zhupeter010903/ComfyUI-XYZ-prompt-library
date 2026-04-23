@@ -28,6 +28,7 @@ export const Autocomplete = defineComponent({
     fetchKind: { type: String, required: true }, // 'tags' | 'prompts'
     placeholder: { type: String, default: '' },
     debounceMs: { type: Number, default: 150 },
+    disabled: { type: Boolean, default: false },
   },
   emits: ['update:modelValue', 'commit'],
   setup(props, { emit }) {
@@ -90,6 +91,12 @@ export const Autocomplete = defineComponent({
     }
 
     async function runFetch() {
+      if (props.disabled) {
+        items.value = [];
+        active.value = -1;
+        loading.value = false;
+        return;
+      }
       const prefix = currentPrefix(props.modelValue);
       const cached = vocabCacheGet(props.fetchKind, prefix);
       if (cached) {
@@ -127,11 +134,17 @@ export const Autocomplete = defineComponent({
     watch(
       () => props.modelValue,
       () => {
-        open.value = true;
-        scheduleFetch();
-        nextTick(() => {
-          updateDropdownPos();
-        });
+        const el = inputRef.value;
+        const typing = el && document.activeElement === el;
+        if (typing) {
+          open.value = true;
+        }
+        if (typing || open.value) {
+          scheduleFetch();
+          nextTick(() => {
+            updateDropdownPos();
+          });
+        }
       },
     );
 
@@ -150,12 +163,32 @@ export const Autocomplete = defineComponent({
       nextTick(scrollActiveIntoView);
     });
 
+    function isTargetInsideThis(t) {
+      if (!(t instanceof Node)) return false;
+      const wrap = inputRef.value && inputRef.value.parentElement;
+      if (wrap && wrap.contains(t)) return true;
+      if (listRef.value && listRef.value.contains(t)) return true;
+      return false;
+    }
+
+    /** Teleported list is outside .ac-wrap — close on any outside press (incl. bulk buttons / grid). */
+    function onDocumentPointerDown(e) {
+      if (!open.value) return;
+      if (isTargetInsideThis(e.target)) return;
+      clearTimer();
+      open.value = false;
+      items.value = [];
+      active.value = -1;
+    }
+
     onMounted(() => {
+      document.addEventListener('pointerdown', onDocumentPointerDown, true);
       window.addEventListener('scroll', onWinReposition, true);
       window.addEventListener('resize', onWinReposition);
     });
 
     onBeforeUnmount(() => {
+      document.removeEventListener('pointerdown', onDocumentPointerDown, true);
       window.removeEventListener('scroll', onWinReposition, true);
       window.removeEventListener('resize', onWinReposition);
       clearTimer();
@@ -163,10 +196,12 @@ export const Autocomplete = defineComponent({
     });
 
     function onInput(e) {
+      if (props.disabled) return;
       emit('update:modelValue', e.target.value);
     }
 
     function onFocus() {
+      if (props.disabled) return;
       open.value = true;
       scheduleFetch();
       nextTick(() => updateDropdownPos());
@@ -182,6 +217,7 @@ export const Autocomplete = defineComponent({
     }
 
     function choose(row) {
+      if (props.disabled) return;
       if (!row || !row.name) return;
       const next = applyCompletion(props.modelValue, row.name);
       emit('update:modelValue', next);
@@ -191,7 +227,19 @@ export const Autocomplete = defineComponent({
       emit('commit');
     }
 
+    watch(
+      () => props.disabled,
+      (v) => {
+        if (v) {
+          open.value = false;
+          items.value = [];
+          active.value = -1;
+        }
+      },
+    );
+
     function onKeydown(e) {
+      if (props.disabled) return;
       if (!open.value || !items.value.length) {
         if (e.key === 'Enter') emit('commit');
         return;
@@ -211,6 +259,8 @@ export const Autocomplete = defineComponent({
         }
       } else if (e.key === 'Escape') {
         open.value = false;
+        items.value = [];
+        active.value = -1;
       }
     }
 
@@ -237,6 +287,7 @@ export const Autocomplete = defineComponent({
              class="ac-input"
              :value="modelValue"
              :placeholder="placeholder"
+             :disabled="disabled"
              autocomplete="off"
              @input="onInput"
              @focus="onFocus"

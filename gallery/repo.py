@@ -12,15 +12,14 @@ Scope:
   * **Op classes**: ``UpsertImageOp`` (T07), ``EnsureFolderOp`` (T05),
     ``InsertThumbCacheOp`` (T08), ``SetSyncStatusOp`` / ``SetSyncFailedOp`` /
     ``SetSyncHardFailedOp`` (T17), ``DeleteImageOp`` (T20+), placeholder
-    ``UpdateImagePathOp`` (T24).
+    ``UpdateImagePathOp`` (T24 bulk / single move path update).
   * **Read side (T09)**: ``get_image`` / ``list_images`` (cursor-paged,
     filtered) / ``folder_tree`` / ``neighbors``.  All read APIs open a
     short-lived ``db.connect_read`` connection (WAL → multi-reader);
     they never touch the WriteQueue.
 
 Out of scope (deferred):
-  * Selection resolution                           — T23
-  * ``UpdateImagePathOp`` (bulk path update)         — T24
+  * ``UpdateImagePathOp`` (bulk path update)         — T24 (implemented)
   * FTS5 ``image_fts`` + search queries             — T28
 """
 
@@ -80,6 +79,12 @@ __all__ = [
     "model_vocab_label",
     "VOCAB_LOOKUP_DEFAULT_LIMIT",
     "VOCAB_LOOKUP_MAX_LIMIT",
+    "SelectionSpec",
+    "count_selection",
+    "list_selection_ids_preview",
+    "fetch_selection_id_paths",
+    "fetch_selection_id_path_tags_csv",
+    "fetch_selection_move_sources",
 ]
 
 
@@ -486,10 +491,75 @@ class ResyncMetadataOp:
 
 
 class UpdateImagePathOp:
-    """Placeholder for T24's bulk-move path update."""
+    """Rewrite ``path`` / folder columns after a successful on-disk move (T24)."""
 
-    def apply(self, conn: sqlite3.Connection) -> None:
-        return None
+    def __init__(
+        self,
+        *,
+        image_id: int,
+        path: str,
+        folder_id: int,
+        relative_path: str,
+        filename: str,
+        filename_lc: str,
+        ext: str,
+        file_size: int,
+        mtime_ns: int,
+        refresh_sync: bool = True,
+    ):
+        self.image_id = int(image_id)
+        self.path = str(path)
+        self.folder_id = int(folder_id)
+        self.relative_path = str(relative_path)
+        self.filename = str(filename)
+        self.filename_lc = str(filename_lc)
+        self.ext = str(ext)
+        self.file_size = int(file_size)
+        self.mtime_ns = int(mtime_ns)
+        self.refresh_sync = bool(refresh_sync)
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT id FROM image WHERE id = ?", (self.image_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"image id={self.image_id} not found")
+        sets = [
+            "path = ?",
+            "folder_id = ?",
+            "relative_path = ?",
+            "filename = ?",
+            "filename_lc = ?",
+            "ext = ?",
+            "file_size = ?",
+            "mtime_ns = ?",
+            "version = version + 1",
+        ]
+        params: List[Any] = [
+            self.path,
+            self.folder_id,
+            self.relative_path,
+            self.filename,
+            self.filename_lc,
+            self.ext,
+            self.file_size,
+            self.mtime_ns,
+        ]
+        if self.refresh_sync:
+            sets.extend(
+                (
+                    "metadata_sync_status = 'pending'",
+                    "metadata_sync_retry_count = 0",
+                    "metadata_sync_next_retry_at = NULL",
+                    "metadata_sync_last_error = NULL",
+                )
+            )
+        sql = "UPDATE image SET " + ", ".join(sets) + " WHERE id = ? RETURNING version"
+        params.append(self.image_id)
+        out = conn.execute(sql, params).fetchone()
+        if out is None:
+            raise RuntimeError(f"UPDATE image path id={self.image_id} missed RETURNING")
+        return int(out[0])
 
 
 class DeleteImageOp:
@@ -750,6 +820,31 @@ class FilterSpec:
     def __post_init__(self) -> None:
         if self.favorite not in _VALID_FAVORITE_STATES:
             raise ValueError(f"invalid favorite state: {self.favorite!r}")
+
+
+@dataclass(frozen=True)
+class SelectionSpec:
+    """Bulk selection envelope (SPEC §6.2) — T23.
+
+    ``all_except`` uses a server-side subquery; ``explicit`` is bound as
+    ``id IN (…)`` without re-listing the active filter.
+    """
+    mode: str
+    explicit_ids: Tuple[int, ...] = field(default_factory=tuple)
+    filter: Optional[FilterSpec] = None
+    excluded_ids: Tuple[int, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("explicit", "all_except"):
+            raise ValueError("SelectionSpec.mode must be 'explicit' or 'all_except'")
+        if self.mode == "explicit" and not self.explicit_ids:
+            raise ValueError("explicit mode requires a non-empty id set")
+        for i in self.explicit_ids:
+            if int(i) < 1:
+                raise ValueError("explicit ids must be positive")
+        for i in self.excluded_ids:
+            if int(i) < 1:
+                raise ValueError("excluded_ids must be positive")
 
 
 @dataclass(frozen=True)
@@ -1041,6 +1136,140 @@ def _build_filter(
     if not where:
         return "1=1", params
     return " AND ".join(where), params
+
+
+def _selection_predicate_sql(
+    conn: sqlite3.Connection, sel: SelectionSpec
+) -> Tuple[str, List[Any]]:
+    """Predicate on ``image`` / ``folder`` join rows for ``WHERE …`` (no leading WHERE)."""
+    if sel.mode == "explicit":
+        ids = tuple(dict.fromkeys(int(x) for x in sel.explicit_ids))
+        return (
+            "image.id IN (" + ",".join("?" * len(ids)) + ")",
+            list(ids),
+        )
+    if sel.mode == "all_except":
+        flt = sel.filter or FilterSpec()
+        where_sql, where_params = _build_filter(conn, flt)
+        inner = (
+            "SELECT image.id FROM image "
+            "LEFT JOIN folder ON folder.id = image.folder_id "
+            "WHERE " + where_sql
+        )
+        params: List[Any] = list(where_params)
+        excl = tuple(dict.fromkeys(int(x) for x in sel.excluded_ids))
+        if excl:
+            inner += " AND image.id NOT IN (" + ",".join("?" * len(excl)) + ")"
+            params.extend(excl)
+        return ("image.id IN (" + inner + ")", params)
+    raise ValueError("invalid SelectionSpec.mode")
+
+
+def count_selection(*, db_path: _PathArg, sel: SelectionSpec) -> int:
+    """Count images matching ``sel`` (T23 — same rowset as listing, no pagination)."""
+    conn = _db.connect_read(db_path)
+    try:
+        pred, params = _selection_predicate_sql(conn, sel)
+        sql = (
+            "SELECT COUNT(*) FROM image "
+            "LEFT JOIN folder ON folder.id = image.folder_id "
+            f"WHERE {pred}"
+        )
+        (n,) = conn.execute(sql, params).fetchone()
+        return int(n)
+    finally:
+        conn.close()
+
+
+def list_selection_ids_preview(
+    *, db_path: _PathArg, sel: SelectionSpec, limit: int,
+) -> Tuple[int, List[int]]:
+    """Return ``(total, first limit ids)`` for ``GET/POST …/resolve_selection``."""
+    total = count_selection(db_path=db_path, sel=sel)
+    lim = max(0, int(limit))
+    if lim == 0:
+        return total, []
+    conn = _db.connect_read(db_path)
+    try:
+        pred, params = _selection_predicate_sql(conn, sel)
+        sql = (
+            "SELECT image.id FROM image "
+            "LEFT JOIN folder ON folder.id = image.folder_id "
+            f"WHERE {pred} ORDER BY image.id LIMIT ?"
+        )
+        rows = conn.execute(sql, list(params) + [lim]).fetchall()
+        return total, [int(r["id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def fetch_selection_id_paths(
+    *, db_path: _PathArg, sel: SelectionSpec,
+) -> List[Tuple[int, str]]:
+    """Return ``(id, path)`` ordered by id — used by bulk write paths (sandbox)."""
+    conn = _db.connect_read(db_path)
+    try:
+        pred, params = _selection_predicate_sql(conn, sel)
+        sql = (
+            "SELECT image.id, image.path FROM image "
+            "LEFT JOIN folder ON folder.id = image.folder_id "
+            f"WHERE {pred} ORDER BY image.id"
+        )
+        rows = conn.execute(sql, params).fetchall()
+        return [(int(r["id"]), str(r["path"])) for r in rows]
+    finally:
+        conn.close()
+
+
+def fetch_selection_move_sources(
+    *, db_path: _PathArg, sel: SelectionSpec,
+) -> List[Tuple[int, str, int, str]]:
+    """Return ``(id, path, file_size, filename)`` for move preflight (T24)."""
+    conn = _db.connect_read(db_path)
+    try:
+        pred, params = _selection_predicate_sql(conn, sel)
+        sql = (
+            "SELECT image.id, image.path, image.file_size, image.filename "
+            "FROM image "
+            "LEFT JOIN folder ON folder.id = image.folder_id "
+            f"WHERE {pred} ORDER BY image.id"
+        )
+        rows = conn.execute(sql, params).fetchall()
+        out: List[Tuple[int, str, int, str]] = []
+        for r in rows:
+            fs = r["file_size"]
+            out.append(
+                (
+                    int(r["id"]),
+                    str(r["path"]),
+                    int(fs) if fs is not None else 0,
+                    str(r["filename"]),
+                )
+            )
+        return out
+    finally:
+        conn.close()
+
+
+def fetch_selection_id_path_tags_csv(
+    *, db_path: _PathArg, sel: SelectionSpec,
+) -> List[Tuple[int, str, Optional[str]]]:
+    """Return ``(id, path, tags_csv)`` for bulk tag merge (T23)."""
+    conn = _db.connect_read(db_path)
+    try:
+        pred, params = _selection_predicate_sql(conn, sel)
+        sql = (
+            "SELECT image.id, image.path, image.tags_csv FROM image "
+            "LEFT JOIN folder ON folder.id = image.folder_id "
+            f"WHERE {pred} ORDER BY image.id"
+        )
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            (int(r["id"]), str(r["path"]), r["tags_csv"])
+            for r in rows
+        ]
+    finally:
+        conn.close()
 
 
 def _row_to_image_record(row: sqlite3.Row) -> ImageRecord:

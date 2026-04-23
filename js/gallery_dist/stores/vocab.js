@@ -33,4 +33,9 @@ export function vocabCacheSet(kind, prefix, results) {
   }
 }
 
+/** Clear all prefix caches (e.g. after bulk tag edit or new tags in DB). */
+export function vocabCacheClear() {
+  cache.clear();
+}
+
 export const _internals = { MAX_KEYS };

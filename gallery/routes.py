@@ -11,6 +11,12 @@ and model vocab (``repo.vocab_lookup`` / ``list_models_for_vocab``).
 T22 adds ``GET /xyz/gallery/index/status`` for focus reconciliation
 (SPEC §7.8 / §7.9).
 
+T23 adds ``POST /xyz/gallery/bulk/*`` (favorite / tags / ``resolve_selection``)
+with the SPEC §6.2 ``Selection`` envelope (see ``repo.SelectionSpec``).
+
+T24 adds ``POST /xyz/gallery/bulk/move/preflight|execute`` and
+``POST /xyz/gallery/image/{id}/move`` — see ``gallery/service.py``.
+
 T10 scope (TASKS.md T10):
   * SPA shell + static assets (``/xyz/gallery`` + ``/static/*``).
   * Read-only data endpoints backed by ``repo`` read APIs (T09):
@@ -61,6 +67,19 @@ from . import thumbs as _thumbs
 from . import ws_hub as _ws_hub
 
 logger = logging.getLogger("xyz.gallery.routes")
+
+_CLIENT_HDR = "X-XYZ-Gallery-Client-Id"
+
+
+def _client_actor(request: web.Request) -> str:
+    """Stable tab id from SPA header (T25 audit ``actor``)."""
+    raw = request.headers.get(_CLIENT_HDR) or request.headers.get(
+        "X-xyz-gallery-client-id",
+    )
+    if raw and str(raw).strip():
+        return str(raw).strip()[:128]
+    return "anonymous"
+
 
 _SPA_DIR: Path = Path(__file__).resolve().parent.parent / "js" / "gallery_dist"
 _PLACEHOLDER_HTML = (
@@ -230,6 +249,97 @@ def _parse_filter(query) -> _repo.FilterSpec:
         tags_and=tags_and,
         prompts_and=prompts_and,
     )
+
+
+def _parse_filter_mapping(obj: Any) -> _repo.FilterSpec:
+    """JSON body ``filters`` object (``Selection`` in all_except) → ``FilterSpec``."""
+    if not obj:
+        return _repo.FilterSpec()
+    if not isinstance(obj, dict):
+        raise ValueError("filters must be a JSON object")
+    fav = obj.get("favorite", "all")
+    if fav not in ("all", "yes", "no"):
+        raise ValueError("invalid favorite in filters")
+    raw_name = obj.get("name", None)
+    name_val: Optional[str] = None
+    if raw_name is not None and str(raw_name).strip():
+        name_val = str(raw_name)
+    raw_model = obj.get("model", None)
+    model_val: Optional[str] = None
+    if raw_model is not None and str(raw_model).strip():
+        model_val = str(raw_model)
+    folder_id: Optional[int] = None
+    if obj.get("folder_id") is not None and obj.get("folder_id") != "":
+        try:
+            folder_id = int(obj["folder_id"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid folder_id in filters") from exc
+    recursive = bool(obj.get("recursive", False))
+    extra_sw = _prompt_extra_stopwords()
+    tags_and_list: list[str] = []
+    for t in (obj.get("tag_tokens") or obj.get("tags") or ()):
+        nt = _vocab.normalize_tag(str(t))
+        if nt:
+            tags_and_list.append(nt)
+    tags_and = tuple(dict.fromkeys(tags_and_list))
+    prompts_and_list: list[str] = []
+    for p in (obj.get("positive_tokens") or ()):
+        s = str(p).strip()
+        if not s:
+            continue
+        prompts_and_list.extend(_vocab.normalize_prompt(s, extra_sw))
+    prompts_and = tuple(dict.fromkeys(prompts_and_list))
+    return _repo.FilterSpec(
+        name=name_val,
+        favorite=fav,
+        model=model_val,
+        date_after=_parse_iso_date(obj.get("date_after") or None),
+        date_before=_parse_iso_date(obj.get("date_before") or None),
+        folder_id=folder_id,
+        recursive=recursive,
+        tags_and=tags_and,
+        prompts_and=prompts_and,
+    )
+
+
+def _parse_selection(obj: Any) -> _repo.SelectionSpec:
+    if not isinstance(obj, dict):
+        raise ValueError("selection must be a JSON object")
+    mode = obj.get("mode")
+    if mode == "explicit":
+        raw = obj.get("ids")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("selection.ids must be a non-empty array")
+        ids: list[int] = []
+        for x in raw:
+            try:
+                i = int(x)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("selection.ids must contain integers") from exc
+            if i < 1:
+                raise ValueError("invalid image id in selection.ids")
+            ids.append(i)
+        return _repo.SelectionSpec(mode="explicit", explicit_ids=tuple(dict.fromkeys(ids)))
+    if mode == "all_except":
+        flt = _parse_filter_mapping(obj.get("filters"))
+        raw_ex = obj.get("excluded_ids", [])
+        if not isinstance(raw_ex, list):
+            raise ValueError("excluded_ids must be an array")
+        ex_ids: list[int] = []
+        for x in raw_ex:
+            try:
+                eid = int(x)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("excluded_ids must contain integers") from exc
+            if eid < 1:
+                raise ValueError("invalid id in excluded_ids")
+            ex_ids.append(eid)
+        return _repo.SelectionSpec(
+            mode="all_except",
+            filter=flt,
+            excluded_ids=tuple(dict.fromkeys(ex_ids)),
+        )
+    raise ValueError("selection.mode must be 'explicit' or 'all_except'")
 
 
 def _parse_sort(query) -> _repo.SortSpec:
@@ -672,13 +782,319 @@ async def _post_resync(request: web.Request) -> web.Response:
     return web.json_response(_serialize_image(rec))
 
 
-async def _delete_image_stub(request: web.Request) -> web.Response:
+async def _delete_image(request: web.Request) -> web.Response:
     image_id = int(request.match_info.get("id", "0"))
-    return _error(
-        501,
-        "not_implemented",
-        f"DELETE /xyz/gallery/image/{image_id} is not implemented (T25)",
-    )
+    actor = _client_actor(request)
+    try:
+        out = await _run(
+            _service.delete_single_image,
+            image_id,
+            db_path=DB_PATH,
+            actor=actor,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except _service.PreflightMoveError as exc:
+        st = _preflight_status_for_code(exc.code)
+        return _error(st, exc.code, str(exc), exc.details or None)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("delete_single_image failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("delete_single_image failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_bulk_resolve_selection(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    try:
+        sel = _parse_selection(body.get("selection"))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    lim_raw = body.get("limit", 0)
+    try:
+        limit = int(lim_raw) if lim_raw is not None else 0
+    except (TypeError, ValueError):
+        return _error(400, "invalid_body", "limit must be an integer")
+    if limit < 0:
+        return _error(400, "invalid_body", "limit must be non-negative")
+    try:
+        total, ids = await _run(
+            _repo.list_selection_ids_preview,
+            db_path=DB_PATH, sel=sel, limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("list_selection_ids_preview failed")
+        return _error(500, "internal", str(exc))
+    out: dict = {"count": total}
+    if ids:
+        out["ids"] = ids
+    return web.json_response(out)
+
+
+async def _post_bulk_favorite(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    try:
+        sel = _parse_selection(body.get("selection"))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    val = body.get("value", None)
+    if not isinstance(val, bool):
+        return _error(400, "invalid_body", "value must be a boolean")
+    try:
+        out = await _run(
+            _service.bulk_set_favorite, sel, val, db_path=DB_PATH,
+        )
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("bulk_set_favorite failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("bulk_set_favorite failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+def _preflight_status_for_code(code: str) -> int:
+    if code == "not_found":
+        return 404
+    if code == "sandbox":
+        return 403
+    if code == "bad_path":
+        return 400
+    return 400
+
+
+async def _post_bulk_move_preflight(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    try:
+        sel = _parse_selection(body.get("selection"))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    tid = body.get("target_folder_id", None)
+    try:
+        target_folder_id = int(tid)
+    except (TypeError, ValueError):
+        return _error(400, "invalid_body", "target_folder_id must be an integer")
+    try:
+        out = await _run(
+            _service.preflight_move, sel, target_folder_id, db_path=DB_PATH,
+        )
+    except _service.PreflightMoveError as exc:
+        st = _preflight_status_for_code(exc.code)
+        return _error(st, exc.code, str(exc), exc.details or None)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("preflight_move failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("preflight_move failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_bulk_move_execute(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    pid = body.get("plan_id", None)
+    if not isinstance(pid, str) or not pid.strip():
+        return _error(400, "invalid_body", "plan_id must be a non-empty string")
+    ro = body.get("rename_overrides")
+    if ro is not None and not isinstance(ro, dict):
+        return _error(400, "invalid_body", "rename_overrides must be an object")
+    actor = _client_actor(request)
+    try:
+        out = await _run(
+            _service.execute_move,
+            str(pid).strip(), ro, db_path=DB_PATH, actor=actor,
+        )
+    except _service.PreflightMoveError as exc:
+        st = _preflight_status_for_code(exc.code)
+        return _error(st, exc.code, str(exc), exc.details or None)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("execute_move failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("execute_move failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_image_move(request: web.Request) -> web.Response:
+    image_id = int(request.match_info["id"])
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    tid = body.get("target_folder_id", None)
+    try:
+        target_folder_id = int(tid)
+    except (TypeError, ValueError):
+        return _error(400, "invalid_body", "target_folder_id must be an integer")
+    rename = body.get("rename", None)
+    if rename is not None and not isinstance(rename, str):
+        return _error(400, "invalid_body", "rename must be a string or omitted")
+    try:
+        rec = await _run(
+            _service.move_single_image,
+            image_id,
+            target_folder_id,
+            rename,
+            db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except _service.PreflightMoveError as exc:
+        if exc.details and "suggested_name" in exc.details:
+            return _error(
+                409, "invalid_body", str(exc), exc.details,
+            )
+        st = _preflight_status_for_code(exc.code)
+        return _error(st, exc.code, str(exc), exc.details or None)
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("move_single_image failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("move_single_image failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(_serialize_image(rec))
+
+
+async def _post_bulk_tags(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    try:
+        sel = _parse_selection(body.get("selection"))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    add = body.get("add", [])
+    remove = body.get("remove", [])
+    if not isinstance(add, list) or not isinstance(remove, list):
+        return _error(400, "invalid_body", "add and remove must be arrays")
+    add_s = [str(x) for x in add]
+    rem_s = [str(x) for x in remove]
+    try:
+        out = await _run(
+            _service.bulk_edit_tags, sel, add_s, rem_s, db_path=DB_PATH,
+        )
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("bulk_edit_tags failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("bulk_edit_tags failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_bulk_delete_preflight(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    try:
+        sel = _parse_selection(body.get("selection"))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    try:
+        out = await _run(_service.preflight_delete, sel, db_path=DB_PATH)
+    except _service.PreflightMoveError as exc:
+        st = _preflight_status_for_code(exc.code)
+        return _error(st, exc.code, str(exc), exc.details or None)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("preflight_delete failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("preflight_delete failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_bulk_delete_execute(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    pid = body.get("plan_id", None)
+    if not isinstance(pid, str) or not pid.strip():
+        return _error(400, "invalid_body", "plan_id must be a non-empty string")
+    actor = _client_actor(request)
+    try:
+        out = await _run(
+            _service.execute_delete,
+            str(pid).strip(),
+            db_path=DB_PATH,
+            actor=actor,
+        )
+    except _service.PreflightMoveError as exc:
+        st = _preflight_status_for_code(exc.code)
+        return _error(st, exc.code, str(exc), exc.details or None)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("execute_delete failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("execute_delete failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
 
 
 # ---- registration --------------------------------------------------------
@@ -709,14 +1125,22 @@ def register(server) -> None:
     routes.get(r"/xyz/gallery/image/{id:\d+}/workflow.json")(_get_workflow)
     routes.patch(r"/xyz/gallery/image/{id:\d+}")(_patch_image)
     routes.post(r"/xyz/gallery/image/{id:\d+}/resync")(_post_resync)
-    routes.delete(r"/xyz/gallery/image/{id:\d+}")(_delete_image_stub)
+    routes.delete(r"/xyz/gallery/image/{id:\d+}")(_delete_image)
     routes.get(r"/xyz/gallery/thumb/{id:\d+}")(_get_thumb)
     routes.get(r"/xyz/gallery/raw/{id:\d+}")(_get_raw_inline)
     routes.get(r"/xyz/gallery/raw/{id:\d+}/download")(_get_raw_download)
     routes.get("/xyz/gallery/ws")(_ws_handler)
+    routes.post("/xyz/gallery/bulk/resolve_selection")(_post_bulk_resolve_selection)
+    routes.post("/xyz/gallery/bulk/favorite")(_post_bulk_favorite)
+    routes.post("/xyz/gallery/bulk/tags")(_post_bulk_tags)
+    routes.post("/xyz/gallery/bulk/move/preflight")(_post_bulk_move_preflight)
+    routes.post("/xyz/gallery/bulk/move/execute")(_post_bulk_move_execute)
+    routes.post("/xyz/gallery/bulk/delete/preflight")(_post_bulk_delete_preflight)
+    routes.post("/xyz/gallery/bulk/delete/execute")(_post_bulk_delete_execute)
+    routes.post(r"/xyz/gallery/image/{id:\d+}/move")(_post_image_move)
 
     _registered = True
     logger.info(
         "XYZ Gallery routes registered (/xyz/gallery + vocab + read + "
-        "write stub + ws)"
+        "write + bulk + move + delete + ws)"
     )

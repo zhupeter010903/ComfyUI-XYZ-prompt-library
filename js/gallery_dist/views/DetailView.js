@@ -30,10 +30,10 @@
 //       - Back → returns to #/ (hash router). MainView restores scroll
 //         position from sessionStorage (T14 contract: onOpenImage
 //         saves, onMounted restores).
-//       - Delete → stub button, lands in T19/T25.
+//       - Delete → T25 ``ConfirmModal`` + ``DELETE /image/{id}``.
 //
 // T22: Autocomplete tag edit + favorite PATCH + resync + WS (connection store).
-//   * Delete workflow / Move — still T25 / T24
+//   * Move — T24 ; bulk delete — BulkBar (T25)
 import {
   defineComponent, ref, computed, watch,
   onMounted, onBeforeUnmount, nextTick,
@@ -42,15 +42,25 @@ import * as api from '../api.js';
 import { apiQueryObject, filterState } from '../stores/filters.js';
 import { BASE_URL } from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
+import { ConfirmModal } from '../components/ConfirmModal.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
+import { vocabCacheClear } from '../stores/vocab.js';
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 20;
 const ZOOM_STEP = 1.25;
 
+function fmtBytesDv(n) {
+  const x = Number(n) || 0;
+  if (x < 1024) return `${x} B`;
+  if (x < 1024 * 1024) return `${(x / 1024).toFixed(1)} KiB`;
+  if (x < 1024 * 1024 * 1024) return `${(x / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(x / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+}
+
 export const DetailView = defineComponent({
   name: 'DetailView',
-  components: { Autocomplete },
+  components: { Autocomplete, ConfirmModal },
   props: { id: { type: Number, required: true } },
   setup(props) {
     const loading = ref(true);
@@ -77,6 +87,9 @@ export const DetailView = defineComponent({
     const gallerySaving = ref(false);
     const favSaving = ref(false);
     const resyncing = ref(false);
+    const delModal = ref(false);
+    const delBusy = ref(false);
+    const delErr = ref('');
     let unsubEvent = null;
     let unsubRecon = null;
 
@@ -137,6 +150,7 @@ export const DetailView = defineComponent({
         const out = await api.patch(`/image/${id}`, { tags: tagDraft.value.slice() });
         record.value = out;
         syncTagDraft();
+        vocabCacheClear();
       } catch (e) {
         if (prev) { record.value = prev; syncTagDraft(); }
       } finally {
@@ -435,6 +449,39 @@ export const DetailView = defineComponent({
       }
     }
 
+    function openDelModal() {
+      delErr.value = '';
+      delModal.value = true;
+    }
+    function closeDelModal() {
+      if (!delBusy.value) delModal.value = false;
+    }
+
+    async function onDeleteConfirmed() {
+      if (!record.value) return;
+      delErr.value = '';
+      delBusy.value = true;
+      try {
+        await api.del(`/image/${props.id}`);
+        delModal.value = false;
+        window.location.hash = '#/';
+      } catch (e) {
+        delErr.value = (e && e.message) ? String(e.message) : String(e);
+      } finally {
+        delBusy.value = false;
+      }
+    }
+
+    const deleteModalLines = computed(() => {
+      const r = record.value;
+      if (!r) return ['Delete this image?'];
+      const bytes = size.value && size.value.bytes != null ? size.value.bytes : 0;
+      return [
+        'Permanently delete "' + String(r.filename) + '" (#' + String(r.id) + ')?',
+        'Approx. size: ' + fmtBytesDv(bytes) + ' — disk file and index row are removed.',
+      ];
+    });
+
     return {
       loading, error, record, meta, gallery, size, folder,
       prevId, nextId, neighborsLoading,
@@ -449,6 +496,9 @@ export const DetailView = defineComponent({
       fit, actualSize, zoomIn, zoomOut,
       gotoPrev, gotoNext, copy,
       onWorkflowClick,
+      delModal, delBusy, delErr, openDelModal, closeDelModal, onDeleteConfirmed,
+      fmtBytesDv,
+      deleteModalLines,
     };
   },
   template: `
@@ -643,12 +693,25 @@ export const DetailView = defineComponent({
                download>Download workflow</a>
             <button type="button"
                     class="dv-btn dv-btn-danger"
-                    disabled
-                    title="Lands in T19 / T25">Delete</button>
+                    :disabled="delBusy || !record"
+                    title="Permanently delete this image"
+                    @click="openDelModal">Delete</button>
             <a class="dv-btn" href="#/">Back</a>
           </div>
         </aside>
       </div>
+      <ConfirmModal
+        v-if="delModal"
+        title="Delete image"
+        :lines="deleteModalLines"
+        confirm-label="Delete"
+        cancel-label="Cancel"
+        :danger="true"
+        :busy="delBusy"
+        @cancel="closeDelModal"
+        @confirm="onDeleteConfirmed"
+      />
+      <p v-if="delErr" class="error dv-del-err">{{ delErr }}</p>
     </section>
   `,
 });
