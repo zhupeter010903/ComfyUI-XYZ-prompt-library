@@ -21,6 +21,7 @@
 //   * T21: wire still carries raw comma-split tokens; HTTP layer normalises
 //     via ``vocab.*`` before SQL (see ``routes._parse_filter``).
 import { reactive, watch } from 'vue';
+import { filterVisibility } from './gallerySettings.js';
 
 const STORAGE_KEY = 'xyz_gallery.filters.v1';
 const COLLAPSE_KEY = 'xyz_gallery.filter_panel_collapsed.v1';
@@ -32,6 +33,10 @@ const CARDS_PER_ROW_DEFAULT = 6;
 const VALID_FAV = new Set(['all', 'yes', 'no']);
 const VALID_SORT_KEY = new Set(['name', 'time', 'size', 'folder']);
 const VALID_SORT_DIR = new Set(['asc', 'desc']);
+/** T31 / SPEC §11 F03 — wire ``metadata_presence`` (default ``all`` = omit). */
+const VALID_METADATA_PRESENCE = new Set(['all', 'yes', 'no']);
+/** T31 / SPEC §11 F04 — wire ``prompt_match_mode`` (default ``prompt`` = omit). */
+const VALID_PROMPT_MATCH_MODE = new Set(['prompt', 'word', 'string']);
 
 export const DEFAULT_FILTER = Object.freeze({
   name: '',
@@ -43,6 +48,8 @@ export const DEFAULT_FILTER = Object.freeze({
   date_before: '',
   folder_id: null,
   recursive: false,
+  metadata_presence: 'all',
+  prompt_match_mode: 'prompt',
 });
 
 export const DEFAULT_SORT = Object.freeze({ key: 'time', dir: 'desc' });
@@ -53,6 +60,8 @@ function cloneDefaults() {
       ...DEFAULT_FILTER,
       positive_tokens: [],
       tag_tokens: [],
+      metadata_presence: 'all',
+      prompt_match_mode: 'prompt',
     },
     sort: { ...DEFAULT_SORT },
   };
@@ -90,6 +99,14 @@ function _readURL() {
   if (prompts.length) { filter.positive_tokens = prompts; hasAny = true; }
   if (sp.has('date_after')) { filter.date_after = sp.get('date_after') || ''; hasAny = true; }
   if (sp.has('date_before')) { filter.date_before = sp.get('date_before') || ''; hasAny = true; }
+  if (sp.has('metadata_presence')) {
+    const v = (sp.get('metadata_presence') || '').trim().toLowerCase();
+    if (VALID_METADATA_PRESENCE.has(v)) { filter.metadata_presence = v; hasAny = true; }
+  }
+  if (sp.has('prompt_match_mode')) {
+    const v = (sp.get('prompt_match_mode') || '').trim().toLowerCase();
+    if (VALID_PROMPT_MATCH_MODE.has(v)) { filter.prompt_match_mode = v; hasAny = true; }
+  }
   if (sp.has('sort')) {
     const v = sp.get('sort');
     if (VALID_SORT_KEY.has(v)) { sort.key = v; hasAny = true; }
@@ -118,6 +135,10 @@ function _readLocal() {
     if (Array.isArray(f.positive_tokens)) filter.positive_tokens = f.positive_tokens.map(String).filter(Boolean);
     if (typeof f.date_after === 'string') filter.date_after = f.date_after;
     if (typeof f.date_before === 'string') filter.date_before = f.date_before;
+    const mp = f.metadata_presence;
+    if (typeof mp === 'string' && VALID_METADATA_PRESENCE.has(mp)) filter.metadata_presence = mp;
+    const pmm = f.prompt_match_mode;
+    if (typeof pmm === 'string' && VALID_PROMPT_MATCH_MODE.has(pmm)) filter.prompt_match_mode = pmm;
     const s = obj.sort || {};
     if (VALID_SORT_KEY.has(s.key)) sort.key = s.key;
     if (VALID_SORT_DIR.has(s.dir)) sort.dir = s.dir;
@@ -187,16 +208,27 @@ export function setCardsPerRow(n) {
 export function apiQueryObject() {
   const f = filterState.filter;
   const s = filterState.sort;
+  const fv = filterVisibility;
   const q = {};
-  if (f.name) q.name = f.name;
-  if (f.model) q.model = f.model;
-  if (f.favorite && f.favorite !== 'all') q.favorite = f.favorite;
+  if (fv.name && f.name) q.name = f.name;
+  if (fv.model && f.model) q.model = f.model;
+  if (fv.favorite && f.favorite && f.favorite !== 'all') q.favorite = f.favorite;
   if (f.folder_id !== null && f.folder_id !== undefined) q.folder_id = f.folder_id;
   if (f.recursive) q.recursive = 'true';
-  if (Array.isArray(f.tag_tokens) && f.tag_tokens.length) q.tag = f.tag_tokens;
-  if (Array.isArray(f.positive_tokens) && f.positive_tokens.length) q.prompt = f.positive_tokens;
-  if (f.date_after) q.date_after = f.date_after;
-  if (f.date_before) q.date_before = f.date_before;
+  if (fv.tags && Array.isArray(f.tag_tokens) && f.tag_tokens.length) {
+    q.tag = f.tag_tokens;
+  }
+  if (fv.prompt_tokens && Array.isArray(f.positive_tokens) && f.positive_tokens.length) {
+    q.prompt = f.positive_tokens;
+  }
+  if (fv.dates && f.date_after) q.date_after = f.date_after;
+  if (fv.dates && f.date_before) q.date_before = f.date_before;
+  if (fv.metadata_presence && f.metadata_presence && f.metadata_presence !== 'all') {
+    q.metadata_presence = f.metadata_presence;
+  }
+  if (fv.prompt_mode && f.prompt_match_mode && f.prompt_match_mode !== 'prompt') {
+    q.prompt_match_mode = f.prompt_match_mode;
+  }
   q.sort = s.key;
   q.dir = s.dir;
   return q;
@@ -232,10 +264,21 @@ watch(
   { deep: true }
 );
 
+watch(
+  filterVisibility,
+  () => { _syncURL(); },
+  { deep: true },
+);
+
+/** Reset name/tags/dates/model/favorite/sort etc. to defaults; keep folder tree context. */
 export function resetFilter() {
+  const folderId = filterState.filter.folder_id;
+  const recursive = filterState.filter.recursive;
   const { filter, sort } = cloneDefaults();
   Object.assign(filterState.filter, filter);
   Object.assign(filterState.sort, sort);
+  filterState.filter.folder_id = folderId;
+  filterState.filter.recursive = recursive;
 }
 
 // Test / debug hook — lets the semi-automated test harness pretend

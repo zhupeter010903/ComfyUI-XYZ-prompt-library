@@ -71,7 +71,7 @@ def _run_d1(scratch: Path) -> None:
     rc = db.connect_read(db_path)
     try:
         (uv,) = rc.execute("PRAGMA user_version").fetchone()
-        assert uv == 5, f"expected user_version=5, got {uv}"
+        assert uv == 6, f"expected user_version=6, got {uv}"
         cols = {r[1] for r in rc.execute("PRAGMA table_info(thumbnail_cache)")}
         assert cols == {"hash_key", "image_id", "size_bytes",
                         "created_at", "last_accessed"}, cols
@@ -81,7 +81,7 @@ def _run_d1(scratch: Path) -> None:
         assert "idx_thumb_image_id" in idx_names, idx_names
     finally:
         rc.close()
-    print("D.1 OK (fresh) — user_version=5, thumbnail_cache + T16 sync + model canon")
+    print("D.1 OK (fresh) — user_version=6, thumbnail_cache + T16 sync + model canon + word_token")
 
     # Forced replay: user_version=0 → latest, idempotent DDL (IF NOT EXISTS).
     conn = db.connect_write(db_path)
@@ -94,7 +94,7 @@ def _run_d1(scratch: Path) -> None:
     rc = db.connect_read(db_path)
     try:
         (uv,) = rc.execute("PRAGMA user_version").fetchone()
-        assert uv == 5
+        assert uv == 6
         # Table still there, not duplicated.
         (n,) = rc.execute(
             "SELECT COUNT(*) FROM sqlite_master "
@@ -103,7 +103,7 @@ def _run_d1(scratch: Path) -> None:
         assert n == 1
     finally:
         rc.close()
-    print("D.1 OK (idempotent replay) — user_version=0 → 5 without dup tables")
+    print("D.1 OK (idempotent replay) — user_version=0 → 6 without dup tables")
 
 
 def _run_d2(scratch: Path) -> None:

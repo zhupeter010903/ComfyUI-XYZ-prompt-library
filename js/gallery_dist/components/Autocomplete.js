@@ -25,10 +25,14 @@ export const Autocomplete = defineComponent({
   name: 'Autocomplete',
   props: {
     modelValue: { type: String, default: '' },
-    fetchKind: { type: String, required: true }, // 'tags' | 'prompts'
+    fetchKind: { type: String, required: true }, // 'tags' | 'prompts' | 'words'
     placeholder: { type: String, default: '' },
     debounceMs: { type: Number, default: 150 },
     disabled: { type: Boolean, default: false },
+    /** When true: text input stays enabled but no ``/vocab/*`` fetch (§11 F04 string). */
+    suggestionsOff: { type: Boolean, default: false },
+    /** ``prefix`` (default) or ``contains`` — v1.2 Settings + ``?match=`` on vocab APIs. */
+    vocabMatchMode: { type: String, default: 'prefix' },
   },
   emits: ['update:modelValue', 'commit'],
   setup(props, { emit }) {
@@ -91,14 +95,15 @@ export const Autocomplete = defineComponent({
     }
 
     async function runFetch() {
-      if (props.disabled) {
+      if (props.disabled || props.suggestionsOff) {
         items.value = [];
         active.value = -1;
         loading.value = false;
         return;
       }
       const prefix = currentPrefix(props.modelValue);
-      const cached = vocabCacheGet(props.fetchKind, prefix);
+      const mm = props.vocabMatchMode === 'contains' ? 'contains' : 'prefix';
+      const cached = vocabCacheGet(props.fetchKind, prefix, mm);
       if (cached) {
         items.value = cached;
         active.value = items.value.length ? 0 : -1;
@@ -107,12 +112,18 @@ export const Autocomplete = defineComponent({
       const my = ++seq;
       loading.value = true;
       try {
-        const path = props.fetchKind === 'tags' ? '/vocab/tags' : '/vocab/prompts';
-        const rows = await api.get(path, { query: { prefix, limit: 20 } });
+        const path = props.fetchKind === 'tags'
+          ? '/vocab/tags'
+          : (props.fetchKind === 'words' ? '/vocab/words' : '/vocab/prompts');
+        const query = { prefix, limit: 20 };
+        if (props.vocabMatchMode === 'contains') {
+          query.match = 'contains';
+        }
+        const rows = await api.get(path, { query });
         if (my !== seq) return;
         const list = Array.isArray(rows) ? rows : [];
         items.value = list;
-        vocabCacheSet(props.fetchKind, prefix, list);
+        vocabCacheSet(props.fetchKind, prefix, list, mm);
         active.value = list.length ? 0 : -1;
       } catch {
         if (my !== seq) return;
@@ -139,7 +150,7 @@ export const Autocomplete = defineComponent({
         if (typing) {
           open.value = true;
         }
-        if (typing || open.value) {
+        if (!props.suggestionsOff && (typing || open.value)) {
           scheduleFetch();
           nextTick(() => {
             updateDropdownPos();
@@ -203,8 +214,13 @@ export const Autocomplete = defineComponent({
     function onFocus() {
       if (props.disabled) return;
       open.value = true;
-      scheduleFetch();
-      nextTick(() => updateDropdownPos());
+      if (!props.suggestionsOff) {
+        scheduleFetch();
+        nextTick(() => updateDropdownPos());
+      } else {
+        items.value = [];
+        active.value = -1;
+      }
     }
 
     function onBlur() {
@@ -235,6 +251,28 @@ export const Autocomplete = defineComponent({
           items.value = [];
           active.value = -1;
         }
+      },
+    );
+
+    watch(
+      () => props.suggestionsOff,
+      (v) => {
+        if (v) {
+          clearTimer();
+          open.value = false;
+          items.value = [];
+          active.value = -1;
+        }
+      },
+    );
+
+    watch(
+      () => props.vocabMatchMode,
+      () => {
+        clearTimer();
+        seq += 1;
+        items.value = [];
+        active.value = -1;
       },
     );
 

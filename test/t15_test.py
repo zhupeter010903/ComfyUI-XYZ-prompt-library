@@ -48,7 +48,7 @@ def test_fifty_corpus_rows() -> None:
         ("photo, photo, real", ["photo", "real"]),
         ("before BREAK after", ["before after"]),
         ("xa|yb|zc", ["xa", "yb", "zc"]),
-        ("(nested (deep:2.0) test)", ["nested deep test"]),
+        ("(nested (deep:2.0) test)", ["(nested deep test)"]),
         ("12345", []),
         ("3.14", []),
         ("v1.0release", ["v1.0release"]),
@@ -63,10 +63,10 @@ def test_fifty_corpus_rows() -> None:
         ("foo,,,,bar", ["foo", "bar"]),
         ("mix (a:1) | (b:2)", ["mix a"]),
         ("no|pipes|here", ["no", "pipes", "here"]),
-        ("{}", []),
-        ("()", []),
-        ("[]", []),
-        ("back\\slash word", ["back slash word"]),
+        ("{}", ["{}"]),
+        ("()", ["()"]),
+        ("[]", ["[]"]),
+        ("back\\slash word", ["back\\slash word"]),
         ("unicode 你好", ["unicode 你好"]),
         ("café", ["café"]),
         ("repeat, repeat, repeat", ["repeat"]),
@@ -117,6 +117,14 @@ def test_naive_split_is_larger() -> None:
     assert len(norm) == 1, norm
 
 
+def test_normalize_prompt_strips_trailing_ascii_period() -> None:
+    from gallery import vocab
+
+    toks = vocab.normalize_prompt("foo., bar", frozenset())
+    assert "foo" in toks and "bar" in toks, toks
+    assert not any(t.endswith(".") for t in toks), toks
+
+
 def test_schema_v3_and_vocab_op() -> None:
     from gallery import db, repo
 
@@ -129,7 +137,7 @@ def test_schema_v3_and_vocab_op() -> None:
         finally:
             conn.close()
         (uv,) = sqlite3.connect(str(db_path)).execute("PRAGMA user_version").fetchone()
-        assert uv == 5, uv
+        assert uv == 6, uv
 
         wq = repo.WriteQueue(db_path)
         wq.start()
@@ -247,7 +255,8 @@ def test_schema_v3_and_vocab_op() -> None:
                 "SELECT token, usage_count FROM prompt_token ORDER BY token"
             ).fetchall()
             rows = [(str(r[0]), int(r[1])) for r in pt]
-            assert rows == [("hello", 0), ("onlyone", 1), ("world", 0)]
+            # hello/world usage dropped to 0 → orphan ``prompt_token`` rows removed.
+            assert rows == [("onlyone", 1)], rows
             assert r3.execute(
                 "SELECT COUNT(*) FROM image_prompt_token WHERE image_id = ?",
                 (iid,),
@@ -275,6 +284,7 @@ def main() -> None:
     test_normalize_tag_joins()
     test_stopwords_merge()
     test_naive_split_is_larger()
+    test_normalize_prompt_strips_trailing_ascii_period()
     test_schema_v3_and_vocab_op()
     print("t15_test: all OK")
 

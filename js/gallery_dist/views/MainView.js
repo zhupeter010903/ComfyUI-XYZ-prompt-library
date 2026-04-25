@@ -24,6 +24,7 @@
 //     reconciliation.
 import { defineComponent, ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import * as api from '../api.js';
+import { executeImageDownload } from '../stores/downloadHelper.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 import { FolderTree } from '../components/FolderTree.js';
 import { VirtualGrid } from '../components/VirtualGrid.js';
@@ -39,8 +40,26 @@ import {
 } from '../stores/filters.js';
 import { toggleCardInSelection, resetSelection } from '../stores/selection.js';
 import { vocabCacheClear } from '../stores/vocab.js';
+import {
+  LS_SIDEBAR_W,
+  LS_FILTERS_H,
+  DEFAULT_SIDEBAR_WIDTH_PX,
+  DEFAULT_FILTERS_PANE_HEIGHT_PX,
+  vocabAutocompleteMatch,
+  filterVisibility,
+  developerMode,
+} from '../stores/gallerySettings.js';
 
 const PAGE_SIZE = 120;
+
+function readLayoutNum(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  } catch { /* ignore */ }
+  return fallback;
+}
 
 function fmtBytesCtx(n) {
   const x = Number(n) || 0;
@@ -107,6 +126,15 @@ export const MainView = defineComponent({
     const deleteCtxErr = ref('');
 
     let nameTimer = null;
+    let vocabClearTimer = null;
+    function scheduleVocabCacheClearTags() {
+      if (vocabClearTimer) clearTimeout(vocabClearTimer);
+      vocabClearTimer = setTimeout(() => {
+        vocabClearTimer = null;
+        vocabCacheClear();
+      }, 160);
+    }
+
     let pendingAborter = null;
     let unsubEvent = null;
     let unsubRecon = null;
@@ -121,20 +149,167 @@ export const MainView = defineComponent({
     // restore). T23 bulk checkbox overlay.
     const lastOpenedId = ref(pendingScrollRestore ? pendingScrollRestore.lastId : null);
     const bulkMode = ref(false);
+    const movePickerSelectionHint = computed(() => {
+      const s = movePickerSel.value;
+      if (s && s.mode === 'explicit' && Array.isArray(s.ids)) {
+        return s.ids.length;
+      }
+      return null;
+    });
     // Only increments on full first-page list replace (reset / filter) — not on favorite/WS
     // patches — so VirtualGrid can scroll to top *only* then, never on in-place item edits.
     const gridListGen = ref(0);
+    const folderTreeScrollEl = ref(null);
+    const sidebarStackEl = ref(null);
 
-    async function fetchFolders() {
-      foldersLoading.value = true;
+    const sidebarWidthPx = ref(readLayoutNum(LS_SIDEBAR_W, DEFAULT_SIDEBAR_WIDTH_PX));
+    const filtersPaneHeightPx = ref(readLayoutNum(LS_FILTERS_H, DEFAULT_FILTERS_PANE_HEIGHT_PX));
+
+    let fsUpsertRefreshTimer = null;
+    function scheduleGridRefreshAfterFsUpsert() {
+      if (fsUpsertRefreshTimer) clearTimeout(fsUpsertRefreshTimer);
+      fsUpsertRefreshTimer = setTimeout(() => {
+        fsUpsertRefreshTimer = null;
+        resetAndFetch();
+      }, 420);
+    }
+
+    function persistLayoutDims() {
+      try {
+        localStorage.setItem(LS_SIDEBAR_W, String(Math.round(sidebarWidthPx.value)));
+        localStorage.setItem(LS_FILTERS_H, String(Math.round(filtersPaneHeightPx.value)));
+      } catch { /* ignore */ }
+    }
+
+    const mvGridStyle = computed(() => ({
+      display: 'grid',
+      gridTemplateColumns: `${Math.round(sidebarWidthPx.value)}px 8px 1fr`,
+      alignItems: 'stretch',
+      columnGap: '0',
+    }));
+
+    const filtersPaneStyle = computed(() => {
+      if (panelCollapsed.filters) {
+        return {
+          flex: '0 0 auto',
+          height: 'auto',
+          minHeight: 0,
+          overflow: 'visible',
+        };
+      }
+      return {
+        flex: '0 0 auto',
+        height: `${Math.round(filtersPaneHeightPx.value)}px`,
+        minHeight: '120px',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+      };
+    });
+
+    function clampFiltersPaneHeight() {
+      if (panelCollapsed.filters) return;
+      const aside = sidebarStackEl.value;
+      if (!aside) return;
+      const h = aside.clientHeight;
+      const reserved = 200;
+      const maxH = Math.max(140, h - reserved);
+      const minH = 120;
+      if (filtersPaneHeightPx.value > maxH) filtersPaneHeightPx.value = maxH;
+      if (filtersPaneHeightPx.value < minH) filtersPaneHeightPx.value = minH;
+    }
+
+    let splitVActive = false;
+    let splitVStartX = 0;
+    let splitVStartW = 0;
+    function onSplitVDown(ev) {
+      splitVActive = true;
+      splitVStartX = ev.clientX;
+      splitVStartW = sidebarWidthPx.value;
+      window.addEventListener('mousemove', onSplitVMove, true);
+      window.addEventListener('mouseup', onSplitVUp, true);
+      document.body.classList.add('mv-dragging-col');
+    }
+    function onSplitVMove(ev) {
+      if (!splitVActive) return;
+      const dx = ev.clientX - splitVStartX;
+      let nw = splitVStartW + dx;
+      nw = Math.max(200, Math.min(560, nw));
+      sidebarWidthPx.value = nw;
+    }
+    function onSplitVUp() {
+      if (!splitVActive) return;
+      splitVActive = false;
+      window.removeEventListener('mousemove', onSplitVMove, true);
+      window.removeEventListener('mouseup', onSplitVUp, true);
+      document.body.classList.remove('mv-dragging-col');
+      persistLayoutDims();
+    }
+
+    let splitHActive = false;
+    let splitHStartY = 0;
+    let splitHStartH = 0;
+    function onSplitHDown(ev) {
+      if (panelCollapsed.filters) return;
+      splitHActive = true;
+      splitHStartY = ev.clientY;
+      splitHStartH = filtersPaneHeightPx.value;
+      window.addEventListener('mousemove', onSplitHMove, true);
+      window.addEventListener('mouseup', onSplitHUp, true);
+      document.body.classList.add('mv-dragging-row');
+    }
+    function onSplitHMove(ev) {
+      if (!splitHActive) return;
+      const dy = ev.clientY - splitHStartY;
+      let nh = splitHStartH + dy;
+      nh = Math.max(120, nh);
+      const aside = sidebarStackEl.value;
+      if (aside) {
+        const cap = aside.clientHeight - 200;
+        nh = Math.min(nh, Math.max(140, cap));
+      }
+      filtersPaneHeightPx.value = nh;
+    }
+    function onSplitHUp() {
+      if (!splitHActive) return;
+      splitHActive = false;
+      window.removeEventListener('mousemove', onSplitHMove, true);
+      window.removeEventListener('mouseup', onSplitHUp, true);
+      document.body.classList.remove('mv-dragging-row');
+      clampFiltersPaneHeight();
+      persistLayoutDims();
+    }
+
+    let sidebarResizeObs = null;
+
+    async function fetchFolders(opts = {}) {
+      const silent = !!opts.silent;
+      let prevScroll = null;
+      if (silent && folderTreeScrollEl.value) {
+        prevScroll = folderTreeScrollEl.value.scrollTop;
+      }
+      if (!silent) {
+        foldersLoading.value = true;
+      }
       foldersError.value = null;
       try {
         const resp = await api.get('/folders', { query: { include_counts: 'true' } });
         folders.value = Array.isArray(resp) ? resp : [];
       } catch (e) {
-        foldersError.value = e;
+        if (!silent) {
+          foldersError.value = e;
+        }
       } finally {
-        foldersLoading.value = false;
+        if (!silent) {
+          foldersLoading.value = false;
+        }
+        if (prevScroll != null) {
+          await nextTick();
+          requestAnimationFrame(() => {
+            const el = folderTreeScrollEl.value;
+            if (el) el.scrollTop = prevScroll;
+          });
+        }
       }
     }
 
@@ -262,29 +437,71 @@ export const MainView = defineComponent({
       if (totalCount.value > 0) totalCount.value -= 1;
     }
 
+    watch(
+      () => panelCollapsed.filters,
+      () => {
+        nextTick(() => { clampFiltersPaneHeight(); });
+      },
+    );
+
+    function onFoldersExternalRefresh() {
+      void fetchFolders({ silent: true });
+      resetAndFetch();
+    }
+
     onMounted(() => {
       fetchFolders();
       fetchVocabModels();
       resetAndFetch();
       window.addEventListener('click', closeContextMenu);
       window.addEventListener('scroll', closeContextMenu, true);
+      window.addEventListener('xyz-gallery-folders-refresh', onFoldersExternalRefresh);
+
+      nextTick(() => {
+        clampFiltersPaneHeight();
+        const el = sidebarStackEl.value;
+        if (el && typeof ResizeObserver !== 'undefined') {
+          sidebarResizeObs = new ResizeObserver(() => {
+            clampFiltersPaneHeight();
+          });
+          sidebarResizeObs.observe(el);
+        }
+      });
 
       unsubRecon = subscribeReconcile(() => { resetAndFetch(); });
       unsubEvent = subscribeGalleryEvent((env) => {
         const t = env && env.type;
         const d = (env && env.data) || {};
         if (t === EV.DRIFT) {
+          void fetchFolders({ silent: true });
+          resetAndFetch();
+          return;
+        }
+        if (t === EV.FOLDER_CHANGED) {
+          void fetchFolders({ silent: true });
+          resetAndFetch();
+          return;
+        }
+        if (t === EV.BULK_DONE) {
+          void fetchFolders({ silent: true });
           resetAndFetch();
           return;
         }
         if (t === EV.UPSERTED) {
+          void fetchFolders({ silent: true });
           const iid = typeof d.id === 'number' ? d.id : Number(d.id);
-          if (Number.isFinite(iid)) {
+          if (!Number.isFinite(iid)) return;
+          const idx = images.value.findIndex((x) => x && x.id === iid);
+          if (idx >= 0) {
             void mergeRowFromIndexUpsert(iid);
+          } else {
+            /* New id or row not on current page (OS add/rename): merge cannot insert. */
+            scheduleGridRefreshAfterFsUpsert();
           }
           return;
         }
         if (t === EV.DELETED) {
+          void fetchFolders({ silent: true });
           const iid = typeof d.id === 'number' ? d.id : Number(d.id);
           if (Number.isFinite(iid)) {
             removeImageRowById(iid);
@@ -295,9 +512,10 @@ export const MainView = defineComponent({
           return;
         }
         if (t === EV.UPDATED && typeof d.id === 'number') {
-          if (Array.isArray(d.tags)) vocabCacheClear();
+          if (Array.isArray(d.tags)) scheduleVocabCacheClearTags();
           if (d.moved_to) {
-            void mergeRowFromIndexUpsert(d.id);
+            void fetchFolders({ silent: true });
+            resetAndFetch();
             return;
           }
           const idx = images.value.findIndex((x) => x && x.id === d.id);
@@ -321,12 +539,29 @@ export const MainView = defineComponent({
     });
 
     onBeforeUnmount(() => {
+      if (fsUpsertRefreshTimer) {
+        clearTimeout(fsUpsertRefreshTimer);
+        fsUpsertRefreshTimer = null;
+      }
+      if (splitVActive) onSplitVUp();
+      if (splitHActive) onSplitHUp();
+      if (sidebarResizeObs) {
+        try {
+          sidebarResizeObs.disconnect();
+        } catch { /* ignore */ }
+        sidebarResizeObs = null;
+      }
       if (pendingAborter) pendingAborter.abort();
       if (nameTimer) clearTimeout(nameTimer);
+      if (vocabClearTimer) {
+        clearTimeout(vocabClearTimer);
+        vocabClearTimer = null;
+      }
       if (unsubEvent) { unsubEvent(); unsubEvent = null; }
       if (unsubRecon) { unsubRecon(); unsubRecon = null; }
       window.removeEventListener('click', closeContextMenu);
       window.removeEventListener('scroll', closeContextMenu, true);
+      window.removeEventListener('xyz-gallery-folders-refresh', onFoldersExternalRefresh);
     });
 
     // Any FilterSpec or SortSpec change resets pagination and refetches
@@ -407,8 +642,32 @@ export const MainView = defineComponent({
       if (s !== tagInput.value) tagInput.value = s;
     });
 
+    watch(
+      () => filterState.filter.prompt_match_mode,
+      (_nv, ov) => {
+        if (ov === undefined) return;
+        promptInput.value = '';
+        filterState.filter.positive_tokens = [];
+      },
+    );
+
     const hasDateAfter = computed(() => !!filterState.filter.date_after);
     const hasDateBefore = computed(() => !!filterState.filter.date_before);
+
+    /** T32 — §11 F04: string = no fetch; word = ``/vocab/words``; prompt = ``/vocab/prompts``. */
+    const promptFilterPlaceholder = computed(() => {
+      const m = filterState.filter.prompt_match_mode;
+      if (m === 'string') {
+        return 'Match string: fragments → substring AND (_→ space, case-insensitive)';
+      }
+      if (m === 'word') {
+        return 'Match word: comma/space-separated; autocomplete /vocab/words';
+      }
+      return 'Match phrase: comma segments → §8.8 tokens; autocomplete /vocab/prompts';
+    });
+    const promptFetchKind = computed(() => (
+      filterState.filter.prompt_match_mode === 'word' ? 'words' : 'prompts'
+    ));
 
     // Toolbar — cards-per-row slider + sort dropdown. The slider writes
     // through setCardsPerRow so the clamp/localStorage sink in the
@@ -569,6 +828,21 @@ export const MainView = defineComponent({
       }
     }
 
+    const ctxDownloadBusy = ref(false);
+    async function onCtxDownload() {
+      const id = contextMenu.value.id;
+      closeContextMenu();
+      if (typeof id !== 'number') return;
+      ctxDownloadBusy.value = true;
+      try {
+        await executeImageDownload(id);
+      } catch {
+        /* ignore — user may cancel or network blip */
+      } finally {
+        ctxDownloadBusy.value = false;
+      }
+    }
+
     return {
       folders, foldersLoading, foldersError,
       images, imagesLoading, loadingMore, imagesError,
@@ -577,8 +851,9 @@ export const MainView = defineComponent({
       sort: filterState.sort,
       panelCollapsed, layoutState,
       promptInput, tagInput, nameInput,
-      hasDateAfter, hasDateBefore,
-      contextMenu, movePickerOpen, movePickerSel,
+      hasDateAfter, hasDateBefore, promptFilterPlaceholder, promptFetchKind,
+      vocabAutocompleteMatch,
+      contextMenu, movePickerOpen, movePickerSel, movePickerSelectionHint,
       deleteCtxOpen, deleteCtxBusy, deleteCtxErr, deleteCtxLines,
       onCtxDelete, closeDeleteCtx, onDeleteCtxConfirmed,
       SORT_OPTIONS, sortValue,
@@ -588,100 +863,140 @@ export const MainView = defineComponent({
       toggleCollapse, onResetClick,
       onCardsPerRowInput,
       onOpenImage, onToggleFavorite, onContext,
-      closeContextMenu, onCtxOpenDetail, onCtxMove, closeMovePicker,
-      loadMore, bulkMode, onToggleBulk, gridListGen,
+      closeContextMenu, onCtxOpenDetail, onCtxMove, onCtxDownload, ctxDownloadBusy,
+      closeMovePicker,
+      loadMore, bulkMode, onToggleBulk, gridListGen, folderTreeScrollEl,
+      sidebarStackEl, mvGridStyle, filtersPaneStyle, onSplitVDown, onSplitHDown,
+      fetchFolders, resetAndFetch,
+      filterVisibility,
+      developerMode,
     };
   },
   template: `
-    <div class="mv">
-      <aside class="mv-sidebar">
-        <section class="mv-filters">
-          <div class="mv-sec-head">
-            <button type="button" class="mv-collapse" @click="toggleCollapse">
-              <span class="mv-chevron">{{ panelCollapsed.filters ? '▶' : '▼' }}</span>
-              Filters
-            </button>
-            <button type="button"
-                    class="mv-reset"
-                    :disabled="panelCollapsed.filters"
-                    @click="onResetClick">Reset</button>
-          </div>
-          <div v-show="!panelCollapsed.filters" class="mv-filters-body">
-            <label class="mv-field">
-              <span>name filter:</span>
-              <input type="text"
-                     :value="nameInput"
-                     @input="onNameInput"
-                     placeholder="substring (debounced 250 ms)" />
-            </label>
-            <label class="mv-field">
-              <span>positive prompt filter:</span>
-              <Autocomplete fetch-kind="prompts"
-                            placeholder="comma-separated tokens (T21 autocomplete)"
-                            :model-value="promptInput"
-                            @update:model-value="setPromptInput"
-                            @commit="commitPromptTokens" />
-            </label>
-            <label class="mv-field">
-              <span>tag filter:</span>
-              <Autocomplete fetch-kind="tags"
-                            placeholder="comma-separated tags (T21 autocomplete)"
-                            :model-value="tagInput"
-                            @update:model-value="setTagInput"
-                            @commit="commitTagTokens" />
-            </label>
-            <label class="mv-field">
-              <span>favorite filter:</span>
-              <select v-model="filter.favorite">
-                <option value="all">all</option>
-                <option value="yes">favorite</option>
-                <option value="no">not favorite</option>
-              </select>
-            </label>
-            <label class="mv-field">
-              <span>model filter:</span>
-              <ModelFilterPick v-model="filter.model"
-                               :options="knownModels"
-                               :disabled="panelCollapsed.filters" />
-            </label>
-            <fieldset class="mv-field mv-date">
-              <legend>date filter:</legend>
-              <label class="mv-date-row">
-                <input type="checkbox"
-                       :checked="hasDateAfter"
-                       @change="(e)=>onToggleDateBound('date_after', e.target.checked)" />
-                after:
-                <input type="date"
-                       v-model="filter.date_after"
-                       :disabled="!hasDateAfter" />
-              </label>
-              <label class="mv-date-row">
-                <input type="checkbox"
-                       :checked="hasDateBefore"
-                       @change="(e)=>onToggleDateBound('date_before', e.target.checked)" />
-                before:
-                <input type="date"
-                       v-model="filter.date_before"
-                       :disabled="!hasDateBefore" />
-              </label>
-            </fieldset>
-          </div>
-        </section>
+    <div class="mv" :style="mvGridStyle">
+      <aside class="mv-sidebar" ref="sidebarStackEl">
+        <div class="mv-filters-pane" :style="filtersPaneStyle">
+          <section class="mv-filters mv-filters--stack">
+            <div class="mv-sec-head">
+              <button type="button" class="mv-collapse" @click="toggleCollapse">
+                <span class="mv-chevron">{{ panelCollapsed.filters ? '▶' : '▼' }}</span>
+                Filters
+              </button>
+              <button type="button"
+                      class="mv-reset"
+                      :disabled="panelCollapsed.filters"
+                      @click="onResetClick">Reset</button>
+            </div>
+            <div v-show="!panelCollapsed.filters" class="mv-filters-scroll">
+              <div class="mv-filters-body">
+                <label v-show="filterVisibility.name" class="mv-field">
+                  <span>name filter:</span>
+                  <input type="text"
+                         :value="nameInput"
+                         @input="onNameInput"
+                         placeholder="substring (debounced 250 ms)" />
+                </label>
+                <label v-show="filterVisibility.metadata_presence" class="mv-field">
+                  <span>Comfy metadata (indexed PNG):</span>
+                  <select v-model="filter.metadata_presence">
+                    <option value="all">any</option>
+                    <option value="yes">has metadata</option>
+                    <option value="no">no metadata</option>
+                  </select>
+                </label>
+                <label v-show="filterVisibility.prompt_mode" class="mv-field">
+                  <span>prompt match mode:</span>
+                  <select v-model="filter.prompt_match_mode">
+                    <option value="prompt">Match phrase</option>
+                    <option value="word">Match word</option>
+                    <option value="string">Match string</option>
+                  </select>
+                </label>
+                <label v-show="filterVisibility.prompt_tokens" class="mv-field">
+                  <span>positive prompt filter:</span>
+                  <Autocomplete :fetch-kind="promptFetchKind"
+                                :vocab-match-mode="vocabAutocompleteMatch"
+                                :placeholder="promptFilterPlaceholder"
+                                :suggestions-off="filter.prompt_match_mode === 'string'"
+                                :model-value="promptInput"
+                                @update:model-value="setPromptInput"
+                                @commit="commitPromptTokens" />
+                </label>
+                <label v-show="filterVisibility.tags" class="mv-field">
+                  <span>tag filter:</span>
+                  <Autocomplete fetch-kind="tags"
+                                :vocab-match-mode="vocabAutocompleteMatch"
+                                placeholder="comma-separated tags (T21 autocomplete)"
+                                :model-value="tagInput"
+                                @update:model-value="setTagInput"
+                                @commit="commitTagTokens" />
+                </label>
+                <label v-show="filterVisibility.favorite" class="mv-field">
+                  <span>favorite filter:</span>
+                  <select v-model="filter.favorite">
+                    <option value="all">all</option>
+                    <option value="yes">favorite</option>
+                    <option value="no">not favorite</option>
+                  </select>
+                </label>
+                <label v-show="filterVisibility.model" class="mv-field">
+                  <span>model filter:</span>
+                  <ModelFilterPick v-model="filter.model"
+                                   :options="knownModels"
+                                   :disabled="panelCollapsed.filters" />
+                </label>
+                <fieldset v-show="filterVisibility.dates" class="mv-field mv-date">
+                  <legend>date filter:</legend>
+                  <label class="mv-date-row">
+                    <input type="checkbox"
+                           :checked="hasDateAfter"
+                           @change="(e)=>onToggleDateBound('date_after', e.target.checked)" />
+                    after:
+                    <input type="date"
+                           v-model="filter.date_after"
+                           :disabled="!hasDateAfter" />
+                  </label>
+                  <label class="mv-date-row">
+                    <input type="checkbox"
+                           :checked="hasDateBefore"
+                           @change="(e)=>onToggleDateBound('date_before', e.target.checked)" />
+                    before:
+                    <input type="date"
+                           v-model="filter.date_before"
+                           :disabled="!hasDateBefore" />
+                  </label>
+                </fieldset>
+              </div>
+            </div>
+          </section>
+        </div>
+        <div v-show="!panelCollapsed.filters"
+             class="mv-splitter-h"
+             role="separator"
+             aria-orientation="horizontal"
+             title="Drag to resize filter vs folder area"
+             @mousedown.prevent="onSplitHDown"></div>
         <section class="mv-folders">
           <h3>Folders</h3>
-          <div v-if="foldersLoading" class="muted">Loading folders…</div>
-          <div v-else-if="foldersError" class="error">
+          <div v-if="foldersLoading && !folders.length" class="muted">Loading folders…</div>
+          <div v-else-if="foldersError && !folders.length" class="error">
             <strong>{{ foldersError.code || 'error' }}</strong>: {{ foldersError.message }}
           </div>
-          <FolderTree v-else
-                      :nodes="folders"
-                      :selected-id="filter.folder_id"
-                      :recursive="filter.recursive"
-                      @select="onSelectFolder"
-                      @update:recursive="onToggleRecursive" />
+          <div v-else class="mv-folders-scroll" ref="folderTreeScrollEl">
+            <FolderTree :nodes="folders"
+                        :selected-id="filter.folder_id"
+                        :recursive="filter.recursive"
+                        @select="onSelectFolder"
+                        @update:recursive="onToggleRecursive"
+                        @folders-changed="() => fetchFolders({ silent: true })" />
+          </div>
         </section>
       </aside>
-
+      <div class="mv-splitter-v"
+           role="separator"
+           aria-orientation="vertical"
+           title="Drag to resize sidebar"
+           @mousedown.prevent="onSplitVDown"></div>
       <section class="mv-main">
         <header class="mv-main-head">
           <span class="mv-count">
@@ -689,8 +1004,8 @@ export const MainView = defineComponent({
             image<span v-if="totalCount !== 1">s</span>
             <span v-if="approximate" class="muted"> (approximate)</span>
           </span>
-          <span class="muted mv-sep">·</span>
-          <span class="muted">
+          <span v-show="developerMode" class="muted mv-sep">·</span>
+          <span v-show="developerMode" class="muted">
             folder =
             <code v-if="filter.folder_id === null">all</code>
             <code v-else>#{{ filter.folder_id }}{{ filter.recursive ? ' (recursive)' : '' }}</code>
@@ -743,6 +1058,9 @@ export const MainView = defineComponent({
              :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
              @click.stop>
           <button type="button" @click="onCtxOpenDetail">Open detail</button>
+          <button type="button" :disabled="ctxDownloadBusy" @click="onCtxDownload">
+            {{ ctxDownloadBusy ? 'Downloading…' : 'Download image' }}
+          </button>
           <button type="button" @click="onCtxMove">Move…</button>
           <button type="button" @click="onCtxDelete">Delete…</button>
         </div>
@@ -759,6 +1077,7 @@ export const MainView = defineComponent({
         />
         <MovePicker v-if="movePickerOpen"
                     :forced-selection="movePickerSel"
+                    :selection-count-hint="movePickerSelectionHint != null ? movePickerSelectionHint : undefined"
                     @close="closeMovePicker"
                     @done="resetAndFetch" />
       </section>

@@ -29,6 +29,7 @@ import base64
 import itertools
 import json
 import logging
+import os
 import queue
 import sqlite3
 import threading
@@ -39,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import db as _db
+from . import paths as _paths
 from . import vocab as _vocab
 
 logger = logging.getLogger("xyz.gallery.repo")
@@ -50,11 +52,16 @@ __all__ = [
     "WriteQueue",
     "UpsertImageOp",
     "UpsertVocabAndLinksOp",
+    "RebuildPromptVocabFullOp",
     "UpdateImageOp",
     "ResyncMetadataOp",
     "UpdateImagePathOp",
     "DeleteImageOp",
+    "UnindexCustomRootOp",
+    "RelocateFolderSubtreeDbOp",
+    "PurgeFolderSubtreeDbOp",
     "EnsureFolderOp",
+    "ReconcileFoldersUnderRootOp",
     "InsertThumbCacheOp",
     "SetSyncStatusOp",
     "SetSyncFailedOp",
@@ -85,6 +92,13 @@ __all__ = [
     "fetch_selection_id_paths",
     "fetch_selection_id_path_tags_csv",
     "fetch_selection_move_sources",
+    "list_tags_admin",
+    "DeleteTagByNameOp",
+    "PurgeZeroUsageTagsOp",
+    "RenameTagOp",
+    # T33 folder HTTP helpers
+    "fetch_folder_row",
+    "fetch_folder_with_root",
 ]
 
 
@@ -159,6 +173,7 @@ class UpsertImageOp:
                  tags_csv: Optional[str],
                  indexed_at: int,
                  prompt_tokens: Optional[List[str]] = None,
+                 word_tokens: Optional[List[str]] = None,
                  normalized_tags: Optional[List[str]] = None):
         self.path = path
         self.folder_id = folder_id
@@ -185,6 +200,7 @@ class UpsertImageOp:
         self.tags_csv = tags_csv
         self.indexed_at = int(indexed_at)
         self.prompt_tokens = list(prompt_tokens) if prompt_tokens else []
+        self.word_tokens = list(word_tokens) if word_tokens else []
         self.normalized_tags = list(normalized_tags) if normalized_tags else []
 
     def apply(self, conn: sqlite3.Connection) -> None:
@@ -220,6 +236,7 @@ class UpsertImageOp:
         UpsertVocabAndLinksOp(
             image_id=image_id,
             prompt_tokens=self.prompt_tokens,
+            word_tokens=self.word_tokens,
             tag_names=self.normalized_tags,
         ).apply(conn)
 
@@ -304,9 +321,17 @@ class UpsertVocabAndLinksOp:
     this alone while the image row is mid-upsert elsewhere.
     """
 
-    def __init__(self, *, image_id: int, prompt_tokens: List[str], tag_names: List[str]):
+    def __init__(
+        self,
+        *,
+        image_id: int,
+        prompt_tokens: List[str],
+        tag_names: List[str],
+        word_tokens: Optional[List[str]] = None,
+    ):
         self.image_id = int(image_id)
         self.prompt_tokens = list(prompt_tokens)
+        self.word_tokens = list(word_tokens) if word_tokens else []
         self.tag_names = list(tag_names)
 
     def apply(self, conn: sqlite3.Connection) -> None:
@@ -319,8 +344,30 @@ class UpsertVocabAndLinksOp:
                 "WHERE id = ? AND usage_count > 0",
                 (int(tid),),
             )
+            conn.execute(
+                "DELETE FROM prompt_token WHERE id = ? AND usage_count = 0",
+                (int(tid),),
+            )
         conn.execute(
             "DELETE FROM image_prompt_token WHERE image_id = ?",
+            (self.image_id,),
+        )
+
+        for (wid,) in conn.execute(
+            "SELECT token_id FROM image_word_token WHERE image_id = ?",
+            (self.image_id,),
+        ).fetchall():
+            conn.execute(
+                "UPDATE word_token SET usage_count = usage_count - 1 "
+                "WHERE id = ? AND usage_count > 0",
+                (int(wid),),
+            )
+            conn.execute(
+                "DELETE FROM word_token WHERE id = ? AND usage_count = 0",
+                (int(wid),),
+            )
+        conn.execute(
+            "DELETE FROM image_word_token WHERE image_id = ?",
             (self.image_id,),
         )
 
@@ -356,6 +403,27 @@ class UpsertVocabAndLinksOp:
                 (self.image_id, pid),
             )
 
+        for wtok in self.word_tokens:
+            conn.execute(
+                "INSERT OR IGNORE INTO word_token(token, usage_count) VALUES (?, 0)",
+                (wtok,),
+            )
+            roww = conn.execute(
+                "SELECT id FROM word_token WHERE token = ? COLLATE NOCASE",
+                (wtok,),
+            ).fetchone()
+            if roww is None:
+                raise RuntimeError(f"word_token missing after insert for {wtok!r}")
+            wid = int(roww[0])
+            conn.execute(
+                "UPDATE word_token SET usage_count = usage_count + 1 WHERE id = ?",
+                (wid,),
+            )
+            conn.execute(
+                "INSERT INTO image_word_token(image_id, token_id) VALUES (?, ?)",
+                (self.image_id, wid),
+            )
+
         for name in self.tag_names:
             conn.execute(
                 "INSERT OR IGNORE INTO tag(name, usage_count) VALUES (?, 0)",
@@ -378,12 +446,90 @@ class UpsertVocabAndLinksOp:
             )
 
 
+class RebuildPromptVocabFullOp:
+    """T30 / §11: drop ``prompt_token`` / ``image_prompt_token`` and
+    ``word_token`` / ``image_word_token``, then rebuild from
+    ``image.positive_prompt`` (pipeline tokens + §11 F04 word lexemes).
+    Tags unchanged. Runs as a single writer transaction.
+    """
+
+    def __init__(self, *, extra_stopwords: frozenset):
+        self.extra_stopwords = extra_stopwords
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM image_prompt_token")
+        conn.execute("DELETE FROM prompt_token")
+        conn.execute("DELETE FROM image_word_token")
+        conn.execute("DELETE FROM word_token")
+        for row in conn.execute(
+            "SELECT id, positive_prompt FROM image ORDER BY id",
+        ):
+            image_id = int(row[0])
+            pos = row[1]
+            tokens = _vocab.normalize_prompt(
+                None if pos is None else str(pos),
+                self.extra_stopwords,
+            )
+            for tok in tokens:
+                conn.execute(
+                    "INSERT OR IGNORE INTO prompt_token(token, usage_count) "
+                    "VALUES (?, 0)",
+                    (tok,),
+                )
+                pr = conn.execute(
+                    "SELECT id FROM prompt_token WHERE token = ? COLLATE NOCASE",
+                    (tok,),
+                ).fetchone()
+                if pr is None:
+                    raise RuntimeError(
+                        f"prompt_token missing after insert for {tok!r}",
+                    )
+                pid = int(pr[0])
+                conn.execute(
+                    "UPDATE prompt_token SET usage_count = usage_count + 1 "
+                    "WHERE id = ?",
+                    (pid,),
+                )
+                conn.execute(
+                    "INSERT INTO image_prompt_token(image_id, token_id) "
+                    "VALUES (?, ?)",
+                    (image_id, pid),
+                )
+            for wtok in _vocab.split_positive_prompt_words(
+                None if pos is None else str(pos),
+            ):
+                conn.execute(
+                    "INSERT OR IGNORE INTO word_token(token, usage_count) "
+                    "VALUES (?, 0)",
+                    (wtok,),
+                )
+                wr = conn.execute(
+                    "SELECT id FROM word_token WHERE token = ? COLLATE NOCASE",
+                    (wtok,),
+                ).fetchone()
+                if wr is None:
+                    raise RuntimeError(
+                        f"word_token missing after insert for {wtok!r}",
+                    )
+                wid = int(wr[0])
+                conn.execute(
+                    "UPDATE word_token SET usage_count = usage_count + 1 "
+                    "WHERE id = ?",
+                    (wid,),
+                )
+                conn.execute(
+                    "INSERT INTO image_word_token(image_id, token_id) "
+                    "VALUES (?, ?)",
+                    (image_id, wid),
+                )
+
+
 class UpdateImageOp:
     """PATCH user fields on one ``image`` row + bump ``version`` (T19).
 
     ``favorite`` / ``normalized_tags`` use ``None`` to mean "leave column
     unchanged".  An empty ``normalized_tags`` list clears ``tags_csv`` and
-    all ``image_tag`` links (prompt-token links are preserved).
+    all ``image_tag`` links (prompt-token and word-token links are preserved).
 
     ``apply`` returns the new ``version`` after a successful
     ``RETURNING`` (WriteQueue propagates this via ``Future.set_result``).
@@ -412,6 +558,7 @@ class UpdateImageOp:
             raise KeyError(f"image id={self.image_id} not found")
 
         prompt_tokens: List[str] = []
+        word_tokens: List[str] = []
         if self.normalized_tags is not None:
             for (tok,) in conn.execute(
                 "SELECT prompt_token.token FROM image_prompt_token ipt "
@@ -420,6 +567,13 @@ class UpdateImageOp:
                 (self.image_id,),
             ).fetchall():
                 prompt_tokens.append(str(tok))
+            for (wtok,) in conn.execute(
+                "SELECT word_token.token FROM image_word_token iwt "
+                "INNER JOIN word_token ON word_token.id = iwt.token_id "
+                "WHERE iwt.image_id = ? ORDER BY iwt.rowid",
+                (self.image_id,),
+            ).fetchall():
+                word_tokens.append(str(wtok))
 
         sets: List[str] = []
         params: List[Any] = []
@@ -463,6 +617,7 @@ class UpdateImageOp:
             UpsertVocabAndLinksOp(
                 image_id=self.image_id,
                 prompt_tokens=prompt_tokens,
+                word_tokens=word_tokens,
                 tag_names=list(self.normalized_tags),
             ).apply(conn)
 
@@ -562,6 +717,161 @@ class UpdateImagePathOp:
         return int(out[0])
 
 
+def _delete_image_row_by_id(conn: sqlite3.Connection, image_id: int) -> None:
+    """Cascade-delete one ``image`` row by primary key (DB only)."""
+    for (tid,) in conn.execute(
+        "SELECT token_id FROM image_prompt_token WHERE image_id = ?",
+        (image_id,),
+    ).fetchall():
+        conn.execute(
+            "UPDATE prompt_token SET usage_count = usage_count - 1 "
+            "WHERE id = ? AND usage_count > 0",
+            (int(tid),),
+        )
+        conn.execute(
+            "DELETE FROM prompt_token WHERE id = ? AND usage_count = 0",
+            (int(tid),),
+        )
+    conn.execute(
+        "DELETE FROM image_prompt_token WHERE image_id = ?",
+        (image_id,),
+    )
+    for (wid,) in conn.execute(
+        "SELECT token_id FROM image_word_token WHERE image_id = ?",
+        (image_id,),
+    ).fetchall():
+        conn.execute(
+            "UPDATE word_token SET usage_count = usage_count - 1 "
+            "WHERE id = ? AND usage_count > 0",
+            (int(wid),),
+        )
+        conn.execute(
+            "DELETE FROM word_token WHERE id = ? AND usage_count = 0",
+            (int(wid),),
+        )
+    conn.execute(
+        "DELETE FROM image_word_token WHERE image_id = ?",
+        (image_id,),
+    )
+    for (gid,) in conn.execute(
+        "SELECT tag_id FROM image_tag WHERE image_id = ?",
+        (image_id,),
+    ).fetchall():
+        conn.execute(
+            "UPDATE tag SET usage_count = usage_count - 1 "
+            "WHERE id = ? AND usage_count > 0",
+            (int(gid),),
+        )
+    conn.execute("DELETE FROM image_tag WHERE image_id = ?", (image_id,))
+    conn.execute("DELETE FROM thumbnail_cache WHERE image_id = ?", (image_id,))
+    conn.execute("DELETE FROM image WHERE id = ?", (image_id,))
+
+
+def _rebuild_tags_csv_for_image(conn: sqlite3.Connection, image_id: int) -> int:
+    """Rewrite ``image.tags_csv`` from ``image_tag`` + bump ``version`` (T36 tag admin)."""
+    rows = conn.execute(
+        "SELECT t.name FROM image_tag it "
+        "INNER JOIN tag t ON t.id = it.tag_id "
+        "WHERE it.image_id = ? ORDER BY lower(t.name)",
+        (int(image_id),),
+    ).fetchall()
+    names = [str(r[0]) for r in rows]
+    tags_csv = ",".join(names) if names else None
+    row = conn.execute(
+        "UPDATE image SET tags_csv = ?, version = version + 1, "
+        "metadata_sync_status = 'pending', metadata_sync_retry_count = 0, "
+        "metadata_sync_next_retry_at = NULL, metadata_sync_last_error = NULL "
+        "WHERE id = ? RETURNING version",
+        (tags_csv, int(image_id)),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"image id={image_id} not found")
+    return int(row[0])
+
+
+class DeleteTagByNameOp:
+    """Remove a ``tag`` row (CASCADE ``image_tag``) and refresh ``tags_csv``."""
+
+    def __init__(self, *, name: str):
+        self.name = str(name or "").strip()
+
+    def apply(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        norm = _vocab.normalize_tag(self.name)
+        if not norm:
+            raise ValueError("tag name empty")
+        row = conn.execute(
+            "SELECT id FROM tag WHERE name = ? COLLATE NOCASE",
+            (norm,),
+        ).fetchone()
+        if row is None:
+            return {"deleted": False, "name": norm, "affected": []}
+        tid = int(row[0])
+        image_ids = [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT image_id FROM image_tag WHERE tag_id = ?",
+                (tid,),
+            )
+        ]
+        conn.execute("DELETE FROM tag WHERE id = ?", (tid,))
+        affected: List[Tuple[int, int]] = []
+        for iid in image_ids:
+            ver = _rebuild_tags_csv_for_image(conn, iid)
+            affected.append((iid, ver))
+        return {"deleted": True, "name": norm, "affected": affected}
+
+
+class PurgeZeroUsageTagsOp:
+    """Delete ``tag`` rows with ``usage_count = 0`` (T36 housekeeping)."""
+
+    def apply(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        cur = conn.execute("DELETE FROM tag WHERE usage_count = 0")
+        n = int(cur.rowcount) if cur.rowcount is not None else 0
+        return {"removed": n}
+
+
+class RenameTagOp:
+    """Rename a ``tag`` and resync ``image.tags_csv`` for linked images (T36)."""
+
+    def __init__(self, *, old_name: str, new_name: str):
+        self.old_name = str(old_name or "").strip()
+        self.new_name = str(new_name or "").strip()
+
+    def apply(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        old_n = _vocab.normalize_tag(self.old_name)
+        new_n = _vocab.normalize_tag(self.new_name)
+        if not old_n or not new_n:
+            raise ValueError("tag names must be non-empty")
+        if old_n == new_n:
+            return {"renamed": False, "affected": []}
+        row = conn.execute(
+            "SELECT id FROM tag WHERE name = ? COLLATE NOCASE",
+            (old_n,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"tag {old_n!r} not found")
+        tid = int(row[0])
+        clash = conn.execute(
+            "SELECT id FROM tag WHERE name = ? COLLATE NOCASE AND id != ?",
+            (new_n, tid),
+        ).fetchone()
+        if clash is not None:
+            raise ValueError(f"target tag {new_n!r} already exists")
+        image_ids = [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT image_id FROM image_tag WHERE tag_id = ?",
+                (tid,),
+            )
+        ]
+        conn.execute("UPDATE tag SET name = ? WHERE id = ?", (new_n, tid))
+        affected: List[Tuple[int, int]] = []
+        for iid in image_ids:
+            ver = _rebuild_tags_csv_for_image(conn, iid)
+            affected.append((iid, ver))
+        return {"old": old_n, "new": new_n, "affected": affected}
+
+
 class DeleteImageOp:
     """Remove one ``image`` row and dependent vocab + thumb cache rows (T20+).
 
@@ -580,32 +890,324 @@ class DeleteImageOp:
         if row is None:
             return None
         image_id = int(row[0])
-        for (tid,) in conn.execute(
-            "SELECT token_id FROM image_prompt_token WHERE image_id = ?",
-            (image_id,),
-        ).fetchall():
-            conn.execute(
-                "UPDATE prompt_token SET usage_count = usage_count - 1 "
-                "WHERE id = ? AND usage_count > 0",
-                (int(tid),),
-            )
-        conn.execute(
-            "DELETE FROM image_prompt_token WHERE image_id = ?",
-            (image_id,),
-        )
-        for (gid,) in conn.execute(
-            "SELECT tag_id FROM image_tag WHERE image_id = ?",
-            (image_id,),
-        ).fetchall():
-            conn.execute(
-                "UPDATE tag SET usage_count = usage_count - 1 "
-                "WHERE id = ? AND usage_count > 0",
-                (int(gid),),
-            )
-        conn.execute("DELETE FROM image_tag WHERE image_id = ?", (image_id,))
-        conn.execute("DELETE FROM thumbnail_cache WHERE image_id = ?", (image_id,))
-        conn.execute("DELETE FROM image WHERE id = ?", (image_id,))
+        _delete_image_row_by_id(conn, image_id)
         return image_id
+
+
+class UnindexCustomRootOp:
+    """Drop all ``image`` rows for a removable root and delete its ``folder`` rows."""
+
+    def __init__(self, *, root_id: int, root_path: str):
+        self.root_id = int(root_id)
+        self.root_path = str(root_path)
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        root_pp = Path(self.root_path).resolve(strict=False).as_posix().rstrip("/")
+        for (iid,) in conn.execute(
+            "SELECT id FROM image WHERE folder_id = ?",
+            (self.root_id,),
+        ).fetchall():
+            _delete_image_row_by_id(conn, int(iid))
+        like_pat = _sql_like_escape(root_pp) + "/%"
+        for (fid,) in conn.execute(
+            "SELECT id FROM folder WHERE id != ? AND (path LIKE ? ESCAPE '\\') "
+            "ORDER BY length(path) DESC",
+            (self.root_id, like_pat),
+        ).fetchall():
+            conn.execute("DELETE FROM folder WHERE id = ?", (int(fid),))
+        conn.execute("DELETE FROM folder WHERE id = ?", (self.root_id,))
+
+
+class RelocateFolderSubtreeDbOp:
+    """After directory rename/move, rewrite ``folder.path`` / ``image.path`` rows."""
+
+    def __init__(
+        self,
+        *,
+        root_id: int,
+        root_path: str,
+        old_prefix: str,
+        new_prefix: str,
+        all_roots: Optional[List[Tuple[int, str]]] = None,
+        secondary_relink: Optional[Tuple[int, str]] = None,
+    ):
+        self.root_id = int(root_id)
+        self.root_path = Path(root_path).resolve(strict=False).as_posix().rstrip("/")
+        self.old_prefix = Path(old_prefix).resolve(strict=False).as_posix().rstrip("/")
+        self.new_prefix = Path(new_prefix).resolve(strict=False).as_posix().rstrip("/")
+        ar = list(all_roots) if all_roots else [(int(root_id), str(root_path))]
+        uniq: Dict[int, str] = {}
+        for rid, rp in ar:
+            uniq[int(rid)] = str(rp)
+        self._roots_sorted: List[Tuple[int, str]] = sorted(
+            uniq.items(),
+            key=lambda t: -len(_norm_fs_path(str(t[1]))),
+        )
+        self.secondary_relink = secondary_relink
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        old = self.old_prefix
+        new = self.new_prefix
+        if old == new:
+            return
+        rp = self.root_path
+
+        def _root_for_file(np: str) -> Tuple[int, str]:
+            for rid, rpp_raw in self._roots_sorted:
+                rpn = _norm_fs_path(str(rpp_raw)).rstrip("/")
+                if np == rpn or np.startswith(rpn + "/"):
+                    return int(rid), rpn
+            r0, p0 = self._roots_sorted[0]
+            return int(r0), _norm_fs_path(str(p0)).rstrip("/")
+
+        folder_updates: List[Tuple[int, str]] = []
+        for fid, pth in conn.execute("SELECT id, path FROM folder"):
+            if int(fid) == int(self.root_id):
+                continue
+            pn = _norm_fs_path(str(pth))
+            if pn == old or pn.startswith(old + "/"):
+                folder_updates.append((int(fid), pn))
+        folder_updates.sort(key=lambda t: -len(t[1]))
+        for fid, pn in folder_updates:
+            if pn == old:
+                np = new
+            else:
+                np = new + pn[len(old):]
+            conn.execute(
+                "UPDATE folder SET path = ?, display_name = ? WHERE id = ?",
+                (np, Path(np).name, int(fid)),
+            )
+
+        for row in conn.execute("SELECT id, path FROM image"):
+            iid = int(row[0])
+            pn = _norm_fs_path(str(row[1]))
+            if not (pn.startswith(old + "/") or pn == old):
+                continue
+            if pn == old:
+                continue
+            np = new + pn[len(old):]
+            try:
+                st = os.stat(np)
+            except OSError:
+                continue
+            mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+            file_size = int(st.st_size)
+            rid, rpn = _root_for_file(np)
+            rel = np[len(rpn) + 1:] if len(np) > len(rpn) else ""
+            conn.execute(
+                "UPDATE image SET path = ?, folder_id = ?, relative_path = ?, "
+                "file_size = ?, mtime_ns = ?, version = version + 1, "
+                "metadata_sync_status = 'pending', "
+                "metadata_sync_retry_count = 0, "
+                "metadata_sync_next_retry_at = NULL, "
+                "metadata_sync_last_error = NULL "
+                "WHERE id = ?",
+                (np, int(rid), rel, file_size, mtime_ns, iid),
+            )
+
+        _relink_folder_parent_ids(conn, root_id=int(self.root_id), root_pp=rp)
+        if self.secondary_relink:
+            tid, tp = self.secondary_relink
+            _relink_folder_parent_ids(conn, root_id=int(tid), root_pp=str(tp))
+
+
+class PurgeFolderSubtreeDbOp:
+    """Remove ``image`` + ``folder`` rows whose paths lie under a deleted subtree."""
+
+    def __init__(self, *, subtree_prefix_posix: str):
+        self.prefix = _norm_fs_path(str(subtree_prefix_posix))
+
+    def apply(self, conn: sqlite3.Connection) -> List[int]:
+        old = self.prefix
+        deleted_ids: List[int] = []
+        for iid, pth in conn.execute("SELECT id, path FROM image"):
+            pn = _norm_fs_path(str(pth))
+            if pn == old or pn.startswith(old + "/"):
+                _delete_image_row_by_id(conn, int(iid))
+                deleted_ids.append(int(iid))
+        id_to_path: Dict[int, str] = {}
+        for fid, pth in conn.execute("SELECT id, path FROM folder"):
+            id_to_path[int(fid)] = _norm_fs_path(str(pth))
+        to_del = [
+            fid for fid, pn in id_to_path.items()
+            if pn == old or pn.startswith(old + "/")
+        ]
+        to_del.sort(key=lambda i: -len(id_to_path[i]))
+        for fid in to_del:
+            conn.execute("DELETE FROM folder WHERE id = ?", (fid,))
+        return deleted_ids
+
+
+def _sql_like_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _norm_fs_path(p: str) -> str:
+    """Canonical POSIX path for DB / disk comparisons (Windows-safe)."""
+    return Path(str(p)).resolve(strict=False).as_posix().rstrip("/")
+
+
+def _relink_folder_parent_ids(conn: sqlite3.Connection, *, root_id: int, root_pp: str) -> None:
+    """Recompute ``parent_id`` from ``path`` after subtree path edits (T33)."""
+    rp = _norm_fs_path(root_pp)
+    rows = []
+    for fid, pth in conn.execute("SELECT id, path FROM folder"):
+        pn = _norm_fs_path(str(pth))
+        if int(fid) == int(root_id) or pn == rp or pn.startswith(rp + "/"):
+            rows.append((int(fid), pn))
+    rows.sort(key=lambda t: (len(t[1]), t[0]))
+
+    def _find_id_for_norm(target: str) -> Optional[int]:
+        for i, p in rows:
+            if p == target:
+                return int(i)
+        return None
+
+    for fid, pn in rows:
+        if int(fid) == int(root_id):
+            conn.execute(
+                "UPDATE folder SET parent_id = NULL WHERE id = ?",
+                (int(root_id),),
+            )
+            continue
+        parent_norm = _norm_fs_path(str(Path(pn).parent))
+        if parent_norm == rp:
+            pid = int(root_id)
+        else:
+            found = _find_id_for_norm(parent_norm)
+            pid = int(found) if found is not None else int(root_id)
+        conn.execute(
+            "UPDATE folder SET parent_id = ? WHERE id = ?",
+            (pid, int(fid)),
+        )
+
+
+def _dedupe_folder_rows_by_norm_path(conn: sqlite3.Connection) -> bool:
+    """Merge duplicate ``folder`` rows whose ``path`` normalizes identically (Windows)."""
+    groups: Dict[str, List[int]] = {}
+    for fid, pth in conn.execute("SELECT id, path FROM folder"):
+        key = _norm_fs_path(str(pth))
+        groups.setdefault(key, []).append(int(fid))
+    mutated = False
+    for _key, ids in groups.items():
+        if len(ids) <= 1:
+            continue
+        ids.sort()
+        keep = ids[0]
+        for dup in ids[1:]:
+            conn.execute(
+                "UPDATE image SET folder_id = ? WHERE folder_id = ?",
+                (keep, dup),
+            )
+            conn.execute(
+                "UPDATE folder SET parent_id = ? WHERE parent_id = ?",
+                (keep, dup),
+            )
+            cur = conn.execute("DELETE FROM folder WHERE id = ?", (dup,))
+            if cur.rowcount:
+                mutated = True
+    return mutated
+
+
+class ReconcileFoldersUnderRootOp:
+    """Sync ``folder`` rows under one registered root with on-disk directories."""
+
+    def __init__(self, *, root_id: int, root_path: str, root_kind: str):
+        self.root_id = int(root_id)
+        self.root_path = str(root_path)
+        self.root_kind = str(root_kind)
+
+    def apply(self, conn: sqlite3.Connection) -> bool:
+        if not os.path.isdir(self.root_path):
+            return False
+        root_posix = _norm_fs_path(self.root_path)
+        disk_dirs: set[str] = {root_posix}
+
+        def _on_walk_error(exc: OSError) -> None:
+            logger.warning("reconcile walk error under %s: %s", self.root_path, exc)
+
+        for dirpath, dirnames, _names in os.walk(
+            self.root_path, onerror=_on_walk_error, followlinks=False,
+        ):
+            _paths.prune_derivative_walk_dirnames(dirnames)
+            abs_d = _norm_fs_path(str(dirpath))
+            if abs_d != root_posix and _paths.is_derivative_path_excluded(
+                abs_d + "/.__probe__.png", root_posix,
+            ):
+                continue
+            disk_dirs.add(abs_d)
+
+        rows_here: List[Tuple[int, str, str]] = []
+        for fid, pth in conn.execute("SELECT id, path FROM folder"):
+            raw = str(pth)
+            pn = _norm_fs_path(raw)
+            if int(fid) == int(self.root_id) or pn == root_posix or pn.startswith(
+                root_posix + "/",
+            ):
+                rows_here.append((int(fid), raw, pn))
+
+        db_paths_norm = {r[2] for r in rows_here}
+        norm_to_fid: Dict[str, int] = {}
+        for fid, _raw, pn in rows_here:
+            norm_to_fid[pn] = int(fid)
+
+        prefix = root_posix + "/"
+        mutated = False
+        to_delete = [
+            (norm_to_fid[pn], pn)
+            for pn in db_paths_norm
+            if pn != root_posix and pn.startswith(prefix) and pn not in disk_dirs
+        ]
+        to_delete.sort(key=lambda x: -len(x[1]))
+        for fid, _pn in to_delete:
+            cur = conn.execute("DELETE FROM folder WHERE id = ?", (fid,))
+            if cur.rowcount:
+                mutated = True
+
+        missing = [p for p in sorted(disk_dirs) if p not in db_paths_norm]
+        n_root = len(Path(root_posix).parts)
+
+        def _sub_depth(p: str) -> int:
+            return len(Path(p).parts) - n_root
+
+        missing.sort(key=_sub_depth)
+        for pth in missing:
+            parent = _norm_fs_path(str(Path(pth).parent))
+            if parent == root_posix:
+                parent_id = self.root_id
+            else:
+                prow = conn.execute(
+                    "SELECT id FROM folder WHERE "
+                    "replace(replace(path, char(92), '/'), '//', '/') = ?",
+                    (parent,),
+                ).fetchone()
+                if prow is None:
+                    continue
+                parent_id = int(prow[0])
+            part = Path(pth).name
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO folder"
+                "(path, kind, parent_id, display_name, removable) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (pth, self.root_kind, parent_id, part, 0),
+            )
+            if cur.rowcount:
+                mutated = True
+
+        if _dedupe_folder_rows_by_norm_path(conn):
+            mutated = True
+            _relink_folder_parent_ids(conn, root_id=int(self.root_id), root_pp=root_posix)
+        elif mutated:
+            _relink_folder_parent_ids(conn, root_id=int(self.root_id), root_pp=root_posix)
+
+        if mutated:
+            from . import ws_hub as _ws_hub
+
+            _ws_hub.broadcast(
+                _ws_hub.FOLDER_CHANGED,
+                {"root_id": self.root_id},
+            )
+        return mutated
 
 
 # T05: real (non-placeholder) op for registering a root folder. Lives here
@@ -770,6 +1372,23 @@ VOCAB_LOOKUP_MAX_LIMIT: int = 100
 _VALID_SORT_KEYS: frozenset = frozenset({"name", "time", "size", "folder"})
 _VALID_SORT_DIRS: frozenset = frozenset({"asc", "desc"})
 _VALID_FAVORITE_STATES: frozenset = frozenset({"all", "yes", "no"})
+_VALID_METADATA_PRESENCE: frozenset = frozenset({"all", "yes", "no"})
+_VALID_PROMPT_MATCH_MODE: frozenset = frozenset({"prompt", "word", "string"})
+
+# §11 F03 — row counts as having Comfy-derived metadata when any indexed
+# ComfyUI column is non-empty / non-null (gallery-only mirror fields excluded).
+_HAS_COMFY_METADATA_SQL = (
+    "("
+    "(TRIM(COALESCE(image.positive_prompt, '')) != '') OR "
+    "(TRIM(COALESCE(image.negative_prompt, '')) != '') OR "
+    "(TRIM(COALESCE(image.model, '')) != '') OR "
+    "image.seed IS NOT NULL OR "
+    "image.cfg IS NOT NULL OR "
+    "(TRIM(COALESCE(image.sampler, '')) != '') OR "
+    "(TRIM(COALESCE(image.scheduler, '')) != '') OR "
+    "(COALESCE(image.workflow_present, 0) != 0)"
+    ")"
+)
 
 
 @dataclass(frozen=True)
@@ -801,6 +1420,8 @@ class FilterSpec:
     ``tags_and`` and ``prompts_and`` must be **already normalised** by
     the HTTP layer (``routes._parse_filter``) or tests. Values must match
     ``tag.name`` / ``prompt_token.token`` as stored by the indexer (T15).
+    ``words_and`` (§11 F04 *word* mode) matches ``word_token.token`` from
+    comma+space lexemes on ``positive_prompt`` / wire blobs.
 
     ``date_after`` / ``date_before`` are Unix epoch seconds
     (half-open: ``after <= created_at < before``) to match the on-disk
@@ -816,10 +1437,18 @@ class FilterSpec:
     recursive: bool = False
     tags_and: Tuple[str, ...] = field(default_factory=tuple)
     prompts_and: Tuple[str, ...] = field(default_factory=tuple)
+    words_and: Tuple[str, ...] = field(default_factory=tuple)
+    metadata_presence: str = "all"
+    prompt_match_mode: str = "prompt"
+    prompt_substrings: Tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.favorite not in _VALID_FAVORITE_STATES:
             raise ValueError(f"invalid favorite state: {self.favorite!r}")
+        if self.metadata_presence not in _VALID_METADATA_PRESENCE:
+            raise ValueError(f"invalid metadata_presence: {self.metadata_presence!r}")
+        if self.prompt_match_mode not in _VALID_PROMPT_MATCH_MODE:
+            raise ValueError(f"invalid prompt_match_mode: {self.prompt_match_mode!r}")
 
 
 @dataclass(frozen=True)
@@ -1105,6 +1734,11 @@ def _build_filter(
         where.append("image.created_at < ?")
         params.append(int(flt.date_before))
 
+    if flt.metadata_presence == "yes":
+        where.append(_HAS_COMFY_METADATA_SQL)
+    elif flt.metadata_presence == "no":
+        where.append(f"NOT {_HAS_COMFY_METADATA_SQL}")
+
     # T15 ``image_tag`` / ``image_prompt_token`` — AND semantics on
     # normalised vocabulary keys (routes + indexer share ``vocab.*``).
     for tag in flt.tags_and:
@@ -1120,18 +1754,44 @@ def _build_filter(
         )
         params.append(tok)
 
-    for token in flt.prompts_and:
-        tok = str(token).strip()
-        if not tok:
-            continue
-        where.append(
-            "EXISTS ("
-            "SELECT 1 FROM image_prompt_token ipt "
-            "INNER JOIN prompt_token pt ON pt.id = ipt.token_id "
-            "WHERE ipt.image_id = image.id AND pt.token = ? COLLATE NOCASE"
-            ")"
-        )
-        params.append(tok)
+    if flt.prompt_match_mode == "string":
+        for sub in flt.prompt_substrings:
+            needle = str(sub).strip()
+            if not needle:
+                continue
+            # §11 F05 — same underscore→space on the indexed column side so
+            # substring search lines up with token storage / user queries.
+            where.append(
+                "instr(replace(lower(coalesce(image.positive_prompt, '')), "
+                "'_', ' '), ?) > 0"
+            )
+            params.append(needle.lower())
+    elif flt.prompt_match_mode == "word":
+        for w in flt.words_and:
+            tok = str(w).strip()
+            if not tok:
+                continue
+            where.append(
+                "EXISTS ("
+                "SELECT 1 FROM image_word_token iwt "
+                "INNER JOIN word_token wt ON wt.id = iwt.token_id "
+                "WHERE iwt.image_id = image.id AND wt.token = ? COLLATE NOCASE"
+                ")"
+            )
+            params.append(tok.lower())
+    else:
+        for token in flt.prompts_and:
+            tok = str(token).strip()
+            if not tok:
+                continue
+            where.append(
+                "EXISTS ("
+                "SELECT 1 FROM image_prompt_token ipt "
+                "INNER JOIN prompt_token pt ON pt.id = ipt.token_id "
+                "WHERE ipt.image_id = image.id AND pt.token = ? COLLATE NOCASE"
+                ")"
+            )
+            params.append(tok)
 
     if not where:
         return "1=1", params
@@ -1317,16 +1977,26 @@ def _like_prefix_pattern(raw: str) -> str:
     return s + "%"
 
 
+def _like_contains_pattern(raw: str) -> str:
+    """Escape for SQLite LIKE, then wrap with ``%…%`` (substring match)."""
+    s = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{s}%"
+
+
 def vocab_lookup(
     *,
     db_path: _PathArg,
     kind: str,
     prefix: str = "",
     limit: int = VOCAB_LOOKUP_DEFAULT_LIMIT,
+    match_mode: str = "prefix",
 ) -> Tuple[Dict[str, Any], ...]:
     """Autocomplete rows: ``{name, usage_count}`` sorted per SPEC §7.7."""
-    if kind not in ("tags", "prompts"):
+    if kind not in ("tags", "prompts", "words"):
         raise ValueError(f"unknown vocab kind: {kind!r}")
+    mm = str(match_mode or "prefix").strip().lower()
+    if mm not in ("prefix", "contains"):
+        raise ValueError(f"unknown match_mode: {match_mode!r}")
     lim = max(1, min(int(limit), VOCAB_LOOKUP_MAX_LIMIT))
     pref = (prefix or "").strip()
     conn = _db.connect_read(db_path)
@@ -1340,18 +2010,22 @@ def vocab_lookup(
                 )
                 rows = conn.execute(sql, (lim,)).fetchall()
             else:
-                pat = _like_prefix_pattern(pref)
+                pat = (
+                    _like_prefix_pattern(pref)
+                    if mm == "prefix"
+                    else _like_contains_pattern(pref)
+                )
                 sql = (
                     f"{base} "
                     "WHERE tag.name LIKE ? ESCAPE '\\' "
                     "ORDER BY tag.usage_count DESC, tag.name ASC LIMIT ?"
                 )
                 rows = conn.execute(sql, (pat, lim)).fetchall()
-        else:
+        elif kind == "prompts":
             base = (
                 "SELECT prompt_token.token AS name, "
                 "prompt_token.usage_count AS usage_count "
-                "FROM prompt_token"
+                "FROM prompt_token WHERE prompt_token.usage_count > 0"
             )
             if not pref:
                 sql = (
@@ -1361,12 +2035,42 @@ def vocab_lookup(
                 )
                 rows = conn.execute(sql, (lim,)).fetchall()
             else:
-                pat = _like_prefix_pattern(pref)
+                pat = (
+                    _like_prefix_pattern(pref)
+                    if mm == "prefix"
+                    else _like_contains_pattern(pref)
+                )
                 sql = (
                     f"{base} "
-                    "WHERE prompt_token.token LIKE ? ESCAPE '\\' "
+                    "AND prompt_token.token LIKE ? ESCAPE '\\' "
                     "ORDER BY prompt_token.usage_count DESC, "
                     "prompt_token.token ASC LIMIT ?"
+                )
+                rows = conn.execute(sql, (pat, lim)).fetchall()
+        else:
+            base = (
+                "SELECT word_token.token AS name, "
+                "word_token.usage_count AS usage_count "
+                "FROM word_token WHERE word_token.usage_count > 0"
+            )
+            if not pref:
+                sql = (
+                    f"{base} "
+                    "ORDER BY word_token.usage_count DESC, "
+                    "word_token.token ASC LIMIT ?"
+                )
+                rows = conn.execute(sql, (lim,)).fetchall()
+            else:
+                pat = (
+                    _like_prefix_pattern(pref)
+                    if mm == "prefix"
+                    else _like_contains_pattern(pref)
+                )
+                sql = (
+                    f"{base} "
+                    "AND word_token.token LIKE ? ESCAPE '\\' "
+                    "ORDER BY word_token.usage_count DESC, "
+                    "word_token.token ASC LIMIT ?"
                 )
                 rows = conn.execute(sql, (pat, lim)).fetchall()
     finally:
@@ -1375,6 +2079,67 @@ def vocab_lookup(
         {"name": str(r["name"]), "usage_count": int(r["usage_count"])}
         for r in rows
     )
+
+
+def list_tags_admin(
+    *,
+    db_path: _PathArg,
+    query: str = "",
+    limit: int = 10,
+    offset: int = 0,
+    sort_key: str = "usage",
+    sort_dir: str = "desc",
+) -> Dict[str, Any]:
+    """Settings tag list — substring on ``tag.name``; exact match first; sortable; paged.
+
+    Returns ``{"tags": [{"name", "usage_count"}, ...], "total": <int>}`` where ``total`` is
+    the number of rows matching ``query`` (ignoring ``limit``/``offset``).
+    """
+    lim = max(1, min(int(limit), 100))
+    off = max(0, int(offset))
+    q = (query or "").strip()
+    sk = (sort_key or "usage").strip().lower()
+    if sk not in ("name", "usage"):
+        sk = "usage"
+    sd = (sort_dir or "desc").strip().lower()
+    asc = sd == "asc"
+    conn = _db.connect_read(db_path)
+    try:
+        base = "SELECT name, usage_count FROM tag"
+        if sk == "name":
+            order_inner = "name COLLATE NOCASE ASC" if asc else "name COLLATE NOCASE DESC"
+        else:
+            order_inner = (
+                "usage_count ASC, name COLLATE NOCASE ASC"
+                if asc
+                else "usage_count DESC, name COLLATE NOCASE ASC"
+            )
+        if not q:
+            total = int(conn.execute("SELECT COUNT(*) AS c FROM tag").fetchone()["c"])
+            sql = f"{base} ORDER BY {order_inner} LIMIT ? OFFSET ?"
+            rows = conn.execute(sql, (lim, off)).fetchall()
+        else:
+            pat = _like_contains_pattern(q)
+            exact = _vocab.normalize_tag(q)
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS c FROM tag WHERE name LIKE ? ESCAPE '\\'",
+                    (pat,),
+                ).fetchone()["c"],
+            )
+            sql = (
+                f"{base} WHERE name LIKE ? ESCAPE '\\' "
+                "ORDER BY (CASE WHEN LOWER(name) = LOWER(?) THEN 0 ELSE 1 END), "
+                f"{order_inner} LIMIT ? OFFSET ?"
+            )
+            rows = conn.execute(sql, (pat, exact, lim, off)).fetchall()
+    finally:
+        conn.close()
+    tags = tuple(
+        {"name": str(r["name"]), "usage_count": int(r["usage_count"])}
+        for r in rows
+    )
+    return {"tags": tags, "total": total}
 
 
 def model_vocab_label(full_name: str) -> str:
@@ -1610,6 +2375,73 @@ def neighbors(
     return Neighbors(prev_id=prev_id, next_id=next_id)
 
 
+def fetch_folder_row(*, db_path: _PathArg, folder_id: int) -> Optional[Dict[str, Any]]:
+    """Return one ``folder`` row as a dict, or ``None`` if missing."""
+    conn = _db.connect_read(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, path, kind, parent_id, display_name, removable "
+            "FROM folder WHERE id = ?",
+            (int(folder_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "path": str(row["path"]),
+        "kind": str(row["kind"]),
+        "parent_id": int(row["parent_id"]) if row["parent_id"] is not None else None,
+        "display_name": row["display_name"],
+        "removable": int(row["removable"]),
+    }
+
+
+def fetch_folder_with_root(
+    *, db_path: _PathArg, folder_id: int,
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Return ``(folder_row, root_row)`` where ``root_row`` is the registered root."""
+    conn = _db.connect_read(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, path, kind, parent_id, display_name, removable "
+            "FROM folder WHERE id = ?",
+            (int(folder_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        cur = row
+        while cur["parent_id"] is not None:
+            prow = conn.execute(
+                "SELECT id, path, kind, parent_id, display_name, removable "
+                "FROM folder WHERE id = ?",
+                (int(cur["parent_id"]),),
+            ).fetchone()
+            if prow is None:
+                return None
+            cur = prow
+        folder_d = {
+            "id": int(row["id"]),
+            "path": str(row["path"]),
+            "kind": str(row["kind"]),
+            "parent_id": int(row["parent_id"]) if row["parent_id"] is not None else None,
+            "display_name": row["display_name"],
+            "removable": int(row["removable"]),
+        }
+        root_d = {
+            "id": int(cur["id"]),
+            "path": str(cur["path"]),
+            "kind": str(cur["kind"]),
+            "parent_id": None,
+            "display_name": cur["display_name"],
+            "removable": int(cur["removable"]),
+        }
+        return folder_d, root_d
+    finally:
+        conn.close()
+
+
 def folder_tree(
     *, db_path: _PathArg, include_counts: bool = False,
 ) -> Tuple[FolderNode, ...]:
@@ -1661,6 +2493,8 @@ def folder_tree(
                 # Child path relative to root = child.path - root.path - "/"
                 root_path = str(rows_by_id[root_id]["path"]).rstrip("/")
                 kid_path = str(kid_row["path"])
+                if _paths.is_derivative_path_excluded(kid_path, root_path):
+                    continue
                 if kid_path.startswith(root_path + "/"):
                     new_prefix = kid_path[len(root_path) + 1:] + "/"
                 else:

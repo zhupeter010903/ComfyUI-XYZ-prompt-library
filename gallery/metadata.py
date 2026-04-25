@@ -19,6 +19,7 @@ Boundary notes (PROJECT_STATE §7 / AI_RULES R5.5):
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -348,6 +349,53 @@ def _float_or_none(value: Any, errors: list[str]) -> Optional[float]:
         return None
 
 
+def build_png_download_bytes(path: Any, variant: str) -> bytes:
+    """Re-encode a PNG with text chunks filtered by export ``variant`` (T35).
+
+    ``variant``:
+      * ``no_workflow`` — drop the ComfyUI UI graph ``workflow`` chunk only.
+      * ``clean`` — drop ``workflow``, API ``prompt``, A1111-style ``parameters``,
+        and all ``xyz_gallery.*`` chunks (raster without embedded Comfy / webui
+        generation metadata).
+
+    Pixel data and all other ancillary chunks are preserved as Pillow allows.
+    Raises:
+        FileNotFoundError / ValueError / OSError — same family as
+        :func:`write_xyz_chunks` for non-PNG or missing files.
+    """
+    v = str(variant or "").strip()
+    if v not in ("no_workflow", "clean"):
+        raise ValueError(f"unsupported export variant: {variant!r}")
+
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(str(p))
+    with Image.open(p) as img:
+        img.load()
+        if (img.format or "").upper() != "PNG":
+            raise ValueError(f"not a PNG: format={img.format!r}")
+        text = dict(getattr(img, "text", {}) or {})
+        pnginfo = PngInfo()
+        for key, value in text.items():
+            sk = str(key)
+            if v == "no_workflow" and sk == _KEY_WORKFLOW:
+                continue
+            if v == "clean":
+                if sk in (_KEY_WORKFLOW, _KEY_PROMPT, _KEY_PARAMETERS):
+                    continue
+                if sk.startswith("xyz_gallery."):
+                    continue
+            pnginfo.add_text(sk, str(value), zip=False)
+        buf = io.BytesIO()
+        img.save(
+            buf,
+            format="PNG",
+            pnginfo=pnginfo,
+            compress_level=6,
+        )
+        return buf.getvalue()
+
+
 def write_xyz_chunks(
     path: Any,
     tags: Optional[str],
@@ -455,5 +503,6 @@ __all__ = [
     "is_gallery_atomic_temp_basename",
     "read_comfy_metadata",
     "read_workflow_chunk",
+    "build_png_download_bytes",
     "write_xyz_chunks",
 ]

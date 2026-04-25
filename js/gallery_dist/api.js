@@ -120,6 +120,100 @@ export const post  = (path, body, opts) => _request('POST',  path, { ...opts, bo
 export const patch = (path, body, opts) => _request('PATCH', path, { ...opts, body });
 export const del   = (path, opts) => _request('DELETE', path, opts);
 
+/** Server-backed subset of ``gallery_config.json`` (T36). */
+export async function fetchGalleryPreferences() {
+  return get('/preferences');
+}
+
+export async function patchGalleryPreferences(body) {
+  return patch('/preferences', body);
+}
+
+function _parseFilenameFromContentDisposition(cd) {
+  if (!cd || typeof cd !== 'string') return null;
+  const mStar = cd.match(/filename\*=UTF-8''([^;\s]+)/i);
+  if (mStar) {
+    try {
+      return decodeURIComponent(mStar[1].trim());
+    } catch {
+      return mStar[1];
+    }
+  }
+  const mQ = cd.match(/filename="([^"]+)"/i);
+  if (mQ) return mQ[1];
+  const mBare = cd.match(/filename=([^;\s]+)/i);
+  if (mBare) return mBare[1].trim().replace(/^"(.*)"$/, '$1');
+  return null;
+}
+
+const _ALLOWED_DL_VARIANT = new Set(['full', 'no_workflow', 'clean']);
+
+let _downloadBasenamePrefix = '';
+/** Default PNG export variant (mirrors ``gallery_config.download_variant``). */
+let _downloadVariantDefault = 'full';
+
+export function setDownloadVariant(v) {
+  const s = (v && String(v).trim()) || 'full';
+  _downloadVariantDefault = _ALLOWED_DL_VARIANT.has(s) ? s : 'full';
+}
+
+/** Optional prefix for client ``download=`` filename (T36 ``gallery_config``). */
+export function setDownloadBasenamePrefix(s) {
+  _downloadBasenamePrefix = typeof s === 'string' ? s : '';
+}
+
+/**
+ * Trigger a browser download for ``/raw/{id}/download`` (T35).
+ * Always sends ``?variant=`` using ``opts.variant`` when valid, otherwise
+ * ``setDownloadVariant`` default (server would mirror config, but explicit
+ * query avoids stale CDN / ambiguous caching).
+ */
+export async function downloadImage(imageId, opts = {}) {
+  const q = {};
+  const v = (opts.variant && _ALLOWED_DL_VARIANT.has(opts.variant))
+    ? opts.variant
+    : _downloadVariantDefault;
+  q.variant = v;
+  const url = BASE + `/raw/${Number(imageId)}/download` + _buildQuery(q);
+  const headers = {};
+  const cid = getGalleryClientId();
+  if (cid) headers['X-XYZ-Gallery-Client-Id'] = cid;
+  let resp;
+  try {
+    resp = await fetch(url, { signal: opts.signal, headers });
+  } catch (exc) {
+    if (exc && exc.name === 'AbortError') throw exc;
+    throw new ApiError(0, 'network', (exc && exc.message) || 'network error');
+  }
+  if (!resp.ok) {
+    let code = 'unknown';
+    let message = `HTTP ${resp.status}`;
+    try {
+      const j = await resp.json();
+      if (j && j.error) {
+        code = j.error.code || code;
+        message = j.error.message || message;
+      }
+    } catch { /* ignore */ }
+    throw new ApiError(resp.status, code, message);
+  }
+  const blob = await resp.blob();
+  const cd = resp.headers.get('Content-Disposition');
+  let name = _parseFilenameFromContentDisposition(cd) || `image_${imageId}.png`;
+  if (_downloadBasenamePrefix) {
+    const pre = _downloadBasenamePrefix.replace(/[^\w.\-]+/g, '');
+    if (pre) name = `${pre}_${name}`;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
 /** ws:// or wss:// URL for same-origin /xyz/gallery/ws (browser only). */
 export function buildGalleryWebSocketUrl() {
   if (typeof location === 'undefined' || !location.host) return '';
@@ -176,6 +270,11 @@ export default {
   post,
   patch,
   delete: del,
+  fetchGalleryPreferences,
+  patchGalleryPreferences,
+  downloadImage,
+  setDownloadVariant,
+  setDownloadBasenamePrefix,
   openWS,
   buildGalleryWebSocketUrl,
   getGalleryClientId,

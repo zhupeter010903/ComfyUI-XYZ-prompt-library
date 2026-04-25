@@ -9,7 +9,9 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import platform
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -45,6 +47,20 @@ __all__ = [
     "execute_delete",
     "delete_single_image",
     "PreflightMoveError",
+    "folder_register_custom_root",
+    "folder_unregister_custom_root",
+    "folder_schedule_rescan",
+    "folder_mkdir",
+    "folder_rename",
+    "folder_move",
+    "folder_delete_empty",
+    "folder_delete_preview",
+    "folder_delete_purge",
+    "folder_open_in_os",
+    "tag_admin_list",
+    "tag_admin_delete",
+    "tag_admin_purge_zero",
+    "tag_admin_rename",
 ]
 
 _PLAN_TTL_SEC = 300.0
@@ -1179,3 +1195,473 @@ def bulk_edit_tags(
     return {
         "affected": ok_count, "failed": failed, "bulk_id": bulk_id,
     }
+
+
+def _folder_segment_ok(name: str) -> bool:
+    s = (name or "").strip()
+    if not s or s in (".", ".."):
+        return False
+    if "/" in s or "\\" in s or "\x00" in s:
+        return False
+    return True
+
+
+def _rel_from_root(*, abs_path: str, root_path: str) -> str:
+    rp = Path(str(root_path)).resolve(strict=False).as_posix().rstrip("/")
+    ap = Path(str(abs_path)).resolve(strict=False).as_posix()
+    if ap == rp:
+        return ""
+    if not ap.startswith(rp + "/"):
+        return "\x00"
+    return ap[len(rp) + 1:]
+
+
+def _image_count_under_rel(
+    *, db_path: Path, root_id: int, rel_prefix: str,
+) -> int:
+    conn = _db.connect_read(db_path)
+    try:
+        if rel_prefix == "":
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM image WHERE folder_id = ?",
+                (int(root_id),),
+            ).fetchone()
+            return int(row["c"])
+        esc = (
+            rel_prefix.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pat = esc + "/%"
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM image WHERE folder_id = ? AND "
+            "(relative_path = ? OR relative_path LIKE ? ESCAPE '\\')",
+            (int(root_id), rel_prefix, pat),
+        ).fetchone()
+        return int(row["c"])
+    finally:
+        conn.close()
+
+
+def _broadcast_folder_changed(root_id: int) -> None:
+    _ws_hub.broadcast(_ws_hub.FOLDER_CHANGED, {"root_id": int(root_id)})
+
+
+def folder_register_custom_root(
+    path: str, *, db_path: Path, data_dir: Path,
+) -> Dict[str, Any]:
+    wq = _write_queue_handle()
+    out = _folders.add_root(
+        path, db_path=db_path, data_dir=data_dir, write_queue=wq,
+    )
+    posix = str(out["path"])
+    for row in _folders.list_roots(db_path=db_path):
+        if str(row["path"]) == posix:
+            rid = int(row["id"])
+            folder_schedule_rescan(rid, db_path=db_path)
+            _broadcast_folder_changed(rid)
+            return {
+                "id": rid,
+                "path": posix,
+                "kind": str(out["kind"]),
+                "display_name": str(out["display_name"]),
+                "removable": int(out["removable"]),
+            }
+    raise RuntimeError("folder row missing after add_root")
+
+
+def folder_unregister_custom_root(
+    folder_id: int, *, db_path: Path, data_dir: Path,
+) -> None:
+    row = _repo.fetch_folder_row(db_path=db_path, folder_id=int(folder_id))
+    if row is None:
+        raise KeyError(f"folder {folder_id} not found")
+    if row["parent_id"] is not None:
+        raise ValueError("not a registered root")
+    if int(row["removable"]) != 1:
+        raise PermissionError("cannot remove built-in root")
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.MID,
+        _repo.UnindexCustomRootOp(
+            root_id=int(folder_id),
+            root_path=str(row["path"]),
+        ),
+    )
+    fut.result(timeout=120.0)
+    _folders.remove_root_from_config(str(row["path"]), data_dir=data_dir)
+    _broadcast_folder_changed(int(folder_id))
+
+
+def folder_schedule_rescan(folder_id: int, *, db_path: Path) -> None:
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError(f"folder {folder_id} not found")
+    _ignored, root = pair
+    wq = _write_queue_handle()
+    root_dict = {
+        "id": int(root["id"]),
+        "path": str(root["path"]),
+        "kind": str(root["kind"]),
+    }
+
+    def _worker() -> None:
+        try:
+            from . import indexer as _indexer
+
+            _indexer.delta_scan(
+                root_dict, db_path=db_path, write_queue=wq, mode="light",
+            )
+        except Exception:
+            logger.exception("folder rescan worker failed root_id=%s", root_dict["id"])
+
+    threading.Thread(target=_worker, name="gallery-folder-rescan", daemon=True).start()
+
+
+def folder_mkdir(parent_folder_id: int, name: str, *, db_path: Path) -> Dict[str, Any]:
+    if not _folder_segment_ok(name):
+        raise ValueError("invalid folder name")
+    pair = _repo.fetch_folder_with_root(
+        db_path=db_path, folder_id=int(parent_folder_id),
+    )
+    if pair is None:
+        raise KeyError("folder not found")
+    parent_folder, root = pair
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    parent_dir = _paths.assert_inside_root(parent_folder["path"], root_paths)
+    dest = (Path(str(parent_dir)) / str(name).strip()).resolve(strict=False)
+    _paths.assert_inside_root(dest, root_paths)
+    rp = Path(str(root["path"])).resolve(strict=False).as_posix()
+    if _paths.is_derivative_path_excluded(dest.as_posix() + "/.probe.png", rp):
+        raise ValueError("path not allowed under root")
+    if dest.exists():
+        raise FileExistsError(str(dest))
+    os.mkdir(str(dest), mode=0o755)
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.LOW,
+        _repo.ReconcileFoldersUnderRootOp(
+            root_id=int(root["id"]),
+            root_path=str(root["path"]),
+            root_kind=str(root["kind"]),
+        ),
+    )
+    fut.result(timeout=120.0)
+    _broadcast_folder_changed(int(root["id"]))
+    return {"path": dest.as_posix(), "root_id": int(root["id"])}
+
+
+def folder_rename(folder_id: int, new_name: str, *, db_path: Path) -> None:
+    if not _folder_segment_ok(new_name):
+        raise ValueError("invalid folder name")
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError("folder not found")
+    folder, root = pair
+    if folder["parent_id"] is None:
+        raise PermissionError("cannot rename registered root")
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    old_abs = _paths.assert_inside_root(folder["path"], root_paths)
+    parent = Path(str(old_abs)).parent
+    dest = (parent / str(new_name).strip()).resolve(strict=False)
+    _paths.assert_inside_root(dest, root_paths)
+    rp = Path(str(root["path"])).resolve(strict=False).as_posix()
+    if _paths.is_derivative_path_excluded(dest.as_posix() + "/.probe.png", rp):
+        raise ValueError("path not allowed under root")
+    if dest.exists():
+        raise FileExistsError(str(dest))
+    old_p = Path(str(old_abs)).resolve(strict=False).as_posix()
+    new_p = dest.as_posix()
+    os.rename(old_p, new_p)
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.MID,
+        _repo.RelocateFolderSubtreeDbOp(
+            root_id=int(root["id"]),
+            root_path=str(root["path"]),
+            old_prefix=old_p,
+            new_prefix=new_p,
+        ),
+    )
+    fut.result(timeout=120.0)
+    fut_rec = wq.enqueue_write(
+        _repo.LOW,
+        _repo.ReconcileFoldersUnderRootOp(
+            root_id=int(root["id"]),
+            root_path=str(root["path"]),
+            root_kind=str(root["kind"]),
+        ),
+    )
+    fut_rec.result(timeout=120.0)
+    _broadcast_folder_changed(int(root["id"]))
+    folder_schedule_rescan(int(root["id"]), db_path=db_path)
+
+
+def folder_move(folder_id: int, target_parent_id: int, *, db_path: Path) -> None:
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError("folder not found")
+    folder, root = pair
+    if folder["parent_id"] is None:
+        raise PermissionError("cannot move registered root")
+    tgt = _repo.fetch_folder_with_root(
+        db_path=db_path, folder_id=int(target_parent_id),
+    )
+    if tgt is None:
+        raise KeyError("target folder not found")
+    tgt_folder, tgt_root = tgt
+    cross = int(root["id"]) != int(tgt_root["id"])
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    old_abs = Path(
+        str(_paths.assert_inside_root(folder["path"], root_paths)),
+    ).resolve(strict=False)
+    parent_abs = Path(
+        str(_paths.assert_inside_root(tgt_folder["path"], root_paths)),
+    ).resolve(strict=False)
+    new_abs = (parent_abs / old_abs.name).resolve(strict=False)
+    _paths.assert_inside_root(new_abs, root_paths)
+    rp_src = Path(str(root["path"])).resolve(strict=False).as_posix()
+    rp_tgt = Path(str(tgt_root["path"])).resolve(strict=False).as_posix()
+    rp_chk = rp_tgt if cross else rp_src
+    if _paths.is_derivative_path_excluded(new_abs.as_posix() + "/.probe.png", rp_chk):
+        raise ValueError("path not allowed under root")
+    try:
+        new_abs.relative_to(parent_abs)
+    except ValueError as exc:
+        raise ValueError("invalid target parent") from exc
+    o_str = old_abs.as_posix()
+    p_str = parent_abs.as_posix()
+    if p_str.startswith(o_str + "/") or p_str == o_str:
+        raise ValueError("cannot move folder into itself or its descendant")
+    if new_abs == old_abs:
+        return
+    if new_abs.exists():
+        raise FileExistsError(str(new_abs))
+    shutil.move(o_str, str(new_abs))
+    roots_pairs = [(int(r["id"]), str(r["path"])) for r in roots]
+    sec_rel = (int(tgt_root["id"]), str(tgt_root["path"])) if cross else None
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.MID,
+        _repo.RelocateFolderSubtreeDbOp(
+            root_id=int(root["id"]),
+            root_path=str(root["path"]),
+            old_prefix=o_str,
+            new_prefix=str(new_abs),
+            all_roots=roots_pairs,
+            secondary_relink=sec_rel,
+        ),
+    )
+    fut.result(timeout=120.0)
+    to_rec = [root, tgt_root] if cross else [root]
+    seen: Dict[int, Any] = {}
+    for r in to_rec:
+        seen[int(r["id"])] = r
+    for r in seen.values():
+        fut_rec = wq.enqueue_write(
+            _repo.LOW,
+            _repo.ReconcileFoldersUnderRootOp(
+                root_id=int(r["id"]),
+                root_path=str(r["path"]),
+                root_kind=str(r["kind"]),
+            ),
+        )
+        fut_rec.result(timeout=120.0)
+    for r in seen.values():
+        _broadcast_folder_changed(int(r["id"]))
+        folder_schedule_rescan(int(r["id"]), db_path=db_path)
+
+
+def folder_delete_preview(folder_id: int, *, db_path: Path) -> Dict[str, Any]:
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError("folder not found")
+    folder, root = pair
+    if folder["parent_id"] is None:
+        raise PermissionError("preview is only for subfolders")
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    abs_path = _paths.assert_inside_root(folder["path"], root_paths)
+    rel = _rel_from_root(abs_path=str(abs_path), root_path=str(root["path"]))
+    if rel == "\x00":
+        raise _paths.SandboxError("path outside root")
+    n_img = _image_count_under_rel(
+        db_path=db_path, root_id=int(root["id"]), rel_prefix=rel,
+    )
+    try:
+        disk_n = len(os.listdir(str(abs_path)))
+    except OSError:
+        disk_n = -1
+    return {
+        "indexed_images": int(n_img),
+        "disk_entry_count": int(disk_n),
+        "can_empty_delete": int(n_img) == 0 and disk_n == 0,
+    }
+
+
+def folder_delete_purge(folder_id: int, *, db_path: Path) -> Dict[str, Any]:
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError("folder not found")
+    folder, root = pair
+    if folder["parent_id"] is None:
+        raise PermissionError("cannot purge-delete a registered root this way")
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    abs_path = _paths.assert_inside_root(folder["path"], root_paths)
+    rel = _rel_from_root(abs_path=str(abs_path), root_path=str(root["path"]))
+    if rel == "\x00":
+        raise _paths.SandboxError("path outside root")
+    prefix_norm = Path(str(abs_path)).resolve(strict=False).as_posix().rstrip("/")
+    if not os.path.isdir(str(abs_path)):
+        raise FileNotFoundError(str(abs_path))
+    shutil.rmtree(str(abs_path), ignore_errors=False)
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.MID,
+        _repo.PurgeFolderSubtreeDbOp(subtree_prefix_posix=prefix_norm),
+    )
+    raw = fut.result(timeout=120.0)
+    deleted_ids = raw if isinstance(raw, list) else []
+    for iid in deleted_ids:
+        broadcast_image_deleted(int(iid))
+    fut_rec = wq.enqueue_write(
+        _repo.LOW,
+        _repo.ReconcileFoldersUnderRootOp(
+            root_id=int(root["id"]),
+            root_path=str(root["path"]),
+            root_kind=str(root["kind"]),
+        ),
+    )
+    fut_rec.result(timeout=120.0)
+    _broadcast_folder_changed(int(root["id"]))
+    folder_schedule_rescan(int(root["id"]), db_path=db_path)
+    return {"deleted_images": len(deleted_ids)}
+
+
+def folder_delete_empty(folder_id: int, *, db_path: Path) -> None:
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError("folder not found")
+    folder, root = pair
+    if folder["parent_id"] is None:
+        raise PermissionError("use DELETE /folders/{id} to remove a custom root")
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    abs_path = _paths.assert_inside_root(folder["path"], root_paths)
+    rel = _rel_from_root(abs_path=str(abs_path), root_path=str(root["path"]))
+    if rel == "\x00":
+        raise _paths.SandboxError("path outside root")
+    n_img = _image_count_under_rel(
+        db_path=db_path, root_id=int(root["id"]), rel_prefix=rel,
+    )
+    if n_img > 0:
+        raise OSError(errno.ENOTEMPTY, "folder is not empty (indexed images)")
+    try:
+        names = os.listdir(str(abs_path))
+    except OSError as exc:
+        raise exc
+    if names:
+        raise OSError(errno.ENOTEMPTY, "folder is not empty on disk")
+    os.rmdir(str(abs_path))
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.LOW,
+        _repo.ReconcileFoldersUnderRootOp(
+            root_id=int(root["id"]),
+            root_path=str(root["path"]),
+            root_kind=str(root["kind"]),
+        ),
+    )
+    fut.result(timeout=120.0)
+    _broadcast_folder_changed(int(root["id"]))
+
+
+def folder_open_in_os(folder_id: int, *, db_path: Path) -> None:
+    pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
+    if pair is None:
+        raise KeyError("folder not found")
+    folder, _root = pair
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [str(r["path"]) for r in roots]
+    abs_path = _paths.assert_inside_root(folder["path"], root_paths)
+    p = str(Path(str(abs_path)).resolve(strict=False))
+    system = platform.system()
+    try:
+        if system == "Windows":
+            os.startfile(p)  # type: ignore[attr-defined]
+        elif system == "Darwin":
+            subprocess.Popen(["open", p], close_fds=True)  # noqa: S603
+        else:
+            subprocess.Popen(["xdg-open", p], close_fds=True)  # noqa: S603
+    except OSError as exc:
+        raise RuntimeError(f"failed to open folder: {exc}") from exc
+
+
+def tag_admin_list(
+    *,
+    db_path: Path,
+    query: str = "",
+    limit: int = 10,
+    offset: int = 0,
+    sort_key: str = "usage",
+    sort_dir: str = "desc",
+) -> Dict[str, Any]:
+    """Read-only tag page for Settings (sortable; substring + exact-first; total count)."""
+    page = _repo.list_tags_admin(
+        db_path=db_path,
+        query=query,
+        limit=limit,
+        offset=offset,
+        sort_key=sort_key,
+        sort_dir=sort_dir,
+    )
+    return {
+        "tags": list(page["tags"]),
+        "total": int(page["total"]),
+    }
+
+
+def _broadcast_image_updated_tags(
+    image_id: int, version: int, *, db_path: Path,
+) -> None:
+    """WS + metadata worker — include ``tags`` so the SPA can patch rows without refetch."""
+    rec = _repo.get_image(int(image_id), db_path=db_path)
+    payload: Dict[str, Any] = {"id": int(image_id), "version": int(version)}
+    if rec is not None:
+        payload["tags"] = list(rec.tags)
+    _ws_hub.broadcast(_ws_hub.IMAGE_UPDATED, payload)
+    _metadata_sync.notify(int(image_id), int(version))
+
+
+def tag_admin_delete(*, name: str, db_path: Path) -> Dict[str, Any]:
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(_repo.MID, _repo.DeleteTagByNameOp(name=name))
+    out = fut.result(timeout=120.0)
+    for pair in out.get("affected") or ():
+        iid, ver = int(pair[0]), int(pair[1])
+        _broadcast_image_updated_tags(iid, ver, db_path=db_path)
+    return out
+
+
+def tag_admin_purge_zero(*, db_path: Path) -> Dict[str, Any]:
+    _ = db_path
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(_repo.LOW, _repo.PurgeZeroUsageTagsOp())
+    return fut.result(timeout=120.0)
+
+
+def tag_admin_rename(*, old_name: str, new_name: str, db_path: Path) -> Dict[str, Any]:
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(
+        _repo.MID,
+        _repo.RenameTagOp(old_name=old_name, new_name=new_name),
+    )
+    out = fut.result(timeout=120.0)
+    for pair in out.get("affected") or ():
+        iid, ver = int(pair[0]), int(pair[1])
+        _broadcast_image_updated_tags(iid, ver, db_path=db_path)
+    return out

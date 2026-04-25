@@ -111,19 +111,24 @@ def _assert_detail_view_contract() -> None:
     assert "gotoPrev" in body and "gotoNext" in body
     assert "wrapTarget" in body
     assert "'last'" in body and "'first'" in body
+    assert "onDetailKeydown" in body and "ArrowLeft" in body and "isEditableKeyTarget" in body
+    assert "onCanvasWheel" in body and "WHEEL_ZOOM_STEP" in body
 
     # Copy-to-clipboard for seed / positive / negative (FR-17).
     assert "navigator.clipboard" in body
     assert "'seed'" in body and "'positive'" in body and "'negative'" in body
 
+    # T37 — §11 V1.1-F12 / F14: positive 原文|归一化; gallery 块置顶.
+    assert "归一化" in body and "posView" in body and "displayPositive" in body
+    assert "dv-sec-block" in body and "positive_prompt_normalized" in body
+    assert "startRename" in body and "applyRename" in body
+
     # Download actions (FR-19): image / workflow / delete stub / back.
     # Backend-injected URLs (SPEC §4 #39): record.raw_url is consumed
-    # by the <img>, the /raw/{id}/download URL is composed from id (not
-    # hand-crafted at any earlier layer).
+    # by the <img>. Image file download uses ``executeImageDownload`` (T35).
     assert ":src=\"record.raw_url\"" in body or ":src='record.raw_url'" in body, \
         "must use backend-injected raw_url verbatim"
-    assert "/raw/${record.value.id}/download" in body \
-        or re.search(r"/raw/\$\{[^}]+\}/download", body)
+    assert "executeImageDownload" in body and "onDownloadImage" in body
     assert "/image/${record.value.id}/workflow.json" in body \
         or re.search(r"/image/\$\{[^}]+\}/workflow\.json", body)
 

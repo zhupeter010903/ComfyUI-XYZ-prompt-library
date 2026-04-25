@@ -4,11 +4,13 @@ import { Autocomplete } from './Autocomplete.js';
 import { MovePicker } from './MovePicker.js';
 import { ConfirmModal } from './ConfirmModal.js';
 import * as api from '../api.js';
+import { executeBulkImageDownloads } from '../stores/downloadHelper.js';
 import { vocabCacheClear } from '../stores/vocab.js';
 import { subscribeGalleryEvent } from '../stores/connection.js';
 import {
   selectionState, buildWireSelection, resetSelection, setSelectAllInView,
 } from '../stores/selection.js';
+import { vocabAutocompleteMatch } from '../stores/gallerySettings.js';
 
 function fmtBytes(n) {
   const x = Number(n) || 0;
@@ -212,6 +214,34 @@ export const BulkBar = defineComponent({
       }
     }
 
+    const dlBusy = ref(false);
+    async function doDownloadSelected() {
+      const sel = buildWireSelection();
+      if (!sel) {
+        errorText.value = 'Select at least one image (or use “Select all in view”).';
+        return;
+      }
+      errorText.value = '';
+      dlBusy.value = true;
+      try {
+        const r = await api.post('/bulk/resolve_selection', { selection: sel, limit: 500 });
+        const total = typeof r.count === 'number' ? r.count : 0;
+        const ids = Array.isArray(r.ids) ? r.ids : [];
+        if (!total || !ids.length) {
+          errorText.value = 'Nothing to download.';
+          return;
+        }
+        if (total > 500) {
+          errorText.value = `Selection has ${total} images; downloading first 500 only.`;
+        }
+        await executeBulkImageDownloads(ids, { title: 'Bulk download' });
+      } catch (e) {
+        errorText.value = (e && e.message) ? String(e.message) : String(e);
+      } finally {
+        dlBusy.value = false;
+      }
+    }
+
     async function onDeleteConfirmed() {
       if (!deletePlanId.value) {
         closeDeleteConfirm();
@@ -261,6 +291,7 @@ export const BulkBar = defineComponent({
       deleteConfirmOpen, deletePlanId, deleteTotal, deleteBytes,
       openDeleteConfirm, onDeleteConfirmed, closeDeleteConfirm, fmtBytes,
       deleteConfirmLines,
+      dlBusy, doDownloadSelected, vocabAutocompleteMatch,
     };
   },
   template: `
@@ -276,18 +307,23 @@ export const BulkBar = defineComponent({
         <button type="button" class="bb-btn" :disabled="busy" @click="doFavorite(false)">Unfavorite</button>
         <Autocomplete fetch-kind="tags"
                       class="bb-ac"
+                      :vocab-match-mode="vocabAutocompleteMatch"
                       placeholder="add tags (comma)"
                       :model-value="tagAdd"
                       :disabled="busy"
                       @update:model-value="setTagAdd" />
         <Autocomplete fetch-kind="tags"
                       class="bb-ac"
+                      :vocab-match-mode="vocabAutocompleteMatch"
                       placeholder="remove tags (comma)"
                       :model-value="tagRem"
                       :disabled="busy"
                       @update:model-value="setTagRem" />
         <button type="button" class="bb-btn primary" :disabled="busy" @click="doTags">Apply tags</button>
         <button type="button" class="bb-btn" :disabled="busy" @click="openMove">Move to folder…</button>
+        <button type="button" class="bb-btn" :disabled="busy || dlBusy" @click="doDownloadSelected">
+          {{ dlBusy ? 'Downloading…' : 'Download selected' }}
+        </button>
         <button type="button" class="bb-btn bb-btn-danger" :disabled="busy" @click="openDeleteConfirm">Delete selected…</button>
       </div>
       <div v-if="busy || bulkTotal &gt; 0" class="bb-prog">
@@ -297,7 +333,11 @@ export const BulkBar = defineComponent({
         </div>
       </div>
       <div v-if="errorText" class="bb-err error">{{ errorText }}</div>
-      <MovePicker v-if="moveOpen" :forced-selection="null" @close="closeMove" @done="onMoved" />
+      <MovePicker v-if="moveOpen"
+                  :forced-selection="null"
+                  :selection-count-hint="selectionCount != null ? selectionCount : undefined"
+                  @close="closeMove"
+                  @done="onMoved" />
       <ConfirmModal
         v-if="deleteConfirmOpen"
         title="Delete images"

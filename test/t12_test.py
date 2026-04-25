@@ -68,13 +68,15 @@ def _assert_files_exist() -> None:
         "app.js",
         "api.js",
         "stores/filters.js",
+        "stores/gallerySettings.js",
         "components/FolderTree.js",
         "views/MainView.js",
+        "views/SettingsView.js",
     ]
     for rel in expected:
         p = root / rel
         assert p.is_file(), f"missing SPA asset: {p}"
-    print("T12 disk layout (6 files) OK")
+    print(f"T12 disk layout ({len(expected)} files) OK")
 
 
 def _assert_filters_js_contract() -> None:
@@ -138,6 +140,7 @@ def _assert_main_view_contract() -> None:
     assert "../api.js" in body
     assert "../components/FolderTree.js" in body
     assert "../stores/filters.js" in body
+    assert "../stores/gallerySettings.js" in body
     # Wires the FR labels verbatim per SPEC §2.2.1.
     for label in (
         "name filter:",
@@ -169,8 +172,9 @@ def _assert_app_js_swapped() -> None:
     assert "./views/MainView.js" in body, body[:400]
     assert "MainView" in body
     assert "HomeView" not in body, "HomeView must be gone after T12 swap"
-    # Detail + NotFound are still wired (regression).
+    # Detail + Settings + NotFound are still wired (regression).
     assert "DetailView" in body
+    assert "SettingsView" in body
     assert "NotFoundView" in body
     assert "parseHash" in body
     print("T12 app.js home route → MainView OK")

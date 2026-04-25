@@ -1,8 +1,9 @@
 // components/MovePicker.js — T24 two-phase bulk move UI (preflight + execute).
-import { defineComponent, ref, reactive, computed, watch, onMounted } from 'vue';
+import {
+  defineComponent, ref, reactive, computed, watch, onMounted, onBeforeUnmount,
+} from 'vue';
 import * as api from '../api.js';
 import { buildWireSelection } from '../stores/selection.js';
-import { ConfirmModal } from './ConfirmModal.js';
 
 function fmtBytes(n) {
   const x = Number(n) || 0;
@@ -29,9 +30,10 @@ function flattenFolders(nodes, depth, out) {
 
 export const MovePicker = defineComponent({
   name: 'MovePicker',
-  components: { ConfirmModal },
   props: {
     forcedSelection: { type: Object, default: null },
+    /** When set (e.g. bulk bar), shown as “Moving N image(s)”. */
+    selectionCountHint: { type: Number, default: null },
   },
   emits: ['close', 'done'],
   setup(props, { emit }) {
@@ -44,7 +46,7 @@ export const MovePicker = defineComponent({
     const busy = ref(false);
     const err = ref('');
     const moveBytes = ref(0);
-    const execConfirmOpen = ref(false);
+    let targetDebounce = null;
 
     async function loadFolders() {
       foldersLoading.value = true;
@@ -86,6 +88,19 @@ export const MovePicker = defineComponent({
       },
     );
 
+    watch(targetId, () => {
+      if (targetDebounce) clearTimeout(targetDebounce);
+      targetDebounce = setTimeout(() => {
+        targetDebounce = null;
+        const tid = Number(targetId.value);
+        if (Number.isFinite(tid) && tid >= 1) {
+          void onPreflight();
+        } else {
+          resetPlan();
+        }
+      }, 380);
+    });
+
     function padLabel(n) {
       return '\u00A0'.repeat(n.depth * 2) + n.label;
     }
@@ -125,18 +140,6 @@ export const MovePicker = defineComponent({
       }
     }
 
-    function requestExecuteConfirm() {
-      if (!planId.value) {
-        err.value = 'Run preflight first.';
-        return;
-      }
-      execConfirmOpen.value = true;
-    }
-
-    function closeExecConfirm() {
-      execConfirmOpen.value = false;
-    }
-
     async function onExecute() {
       err.value = '';
       busy.value = true;
@@ -156,7 +159,6 @@ export const MovePicker = defineComponent({
           body.rename_overrides = ro;
         }
         await api.post('/bulk/move/execute', body);
-        execConfirmOpen.value = false;
         emit('done');
         emit('close');
       } catch (e) {
@@ -170,12 +172,26 @@ export const MovePicker = defineComponent({
       emit('close');
     }
 
-    const execConfirmLines = computed(() => {
-      const n = plan.value && plan.value.length ? plan.value.length : 0;
-      return [
-        'Move ' + String(n) + ' file(s) (~' + fmtBytes(moveBytes.value) + ' total)?',
-        'Files are renamed on conflict; existing destinations block the run.',
-      ];
+    async function onRunClick() {
+      err.value = '';
+      if (busy.value) {
+        err.value = 'Preview still loading — wait a moment.';
+        return;
+      }
+      const tid = Number(targetId.value);
+      if (!Number.isFinite(tid) || tid < 1) {
+        err.value = 'Pick a target folder.';
+        return;
+      }
+      if (!planId.value) {
+        await onPreflight();
+        if (!planId.value || err.value) return;
+      }
+      await onExecute();
+    }
+
+    onBeforeUnmount(() => {
+      if (targetDebounce) clearTimeout(targetDebounce);
     });
 
     return {
@@ -190,13 +206,11 @@ export const MovePicker = defineComponent({
       padLabel,
       onPreflight,
       onExecute,
-      requestExecuteConfirm,
-      closeExecConfirm,
-      execConfirmOpen,
+      onRunClick,
       moveBytes,
       fmtBytes,
-      execConfirmLines,
       onCancel,
+      selectionCountHint: computed(() => props.selectionCountHint),
     };
   },
   template: `
@@ -207,7 +221,10 @@ export const MovePicker = defineComponent({
           <button type="button" class="mp-x" :disabled="busy" @click="onCancel">×</button>
         </header>
         <div class="mp-body">
-          <p class="muted mp-hint">1) Choose folder → Preview → 2) Adjust names if needed → Run.</p>
+          <p v-if="selectionCountHint != null && selectionCountHint >= 1" class="muted mp-hint">
+            Moving <strong>{{ selectionCountHint }}</strong> image(s).
+          </p>
+          <p class="muted mp-hint">Choose a target folder — a preview appears automatically. Adjust renamed filenames if needed, then Run.</p>
           <label class="mp-field">
             <span>Target folder</span>
             <select v-model="targetId" :disabled="busy || foldersLoading">
@@ -218,8 +235,8 @@ export const MovePicker = defineComponent({
             </select>
           </label>
           <div class="mp-actions">
-            <button type="button" class="mp-btn" :disabled="busy" @click="onPreflight">Preview</button>
-            <button type="button" class="mp-btn primary" :disabled="busy || !planId" @click="requestExecuteConfirm">Run</button>
+            <button type="button" class="mp-btn" :disabled="busy || foldersLoading" @click="onPreflight">Refresh preview</button>
+            <button type="button" class="mp-btn primary" :disabled="busy || foldersLoading || !targetId" @click="onRunClick">Run</button>
           </div>
           <div v-if="foldersLoading" class="muted">Loading folders…</div>
           <div v-if="err" class="error mp-err">{{ err }}</div>
@@ -245,17 +262,6 @@ export const MovePicker = defineComponent({
           </div>
         </div>
       </div>
-      <ConfirmModal
-        v-if="execConfirmOpen"
-        title="Run bulk move"
-        :lines="execConfirmLines"
-        confirm-label="Run"
-        cancel-label="Back"
-        :danger="true"
-        :busy="busy"
-        @cancel="closeExecConfirm"
-        @confirm="onExecute"
-      />
     </div>
   `,
 });

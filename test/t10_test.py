@@ -401,12 +401,18 @@ async def _assert_count(client: TestClient, ref: Dict[str, Any]) -> None:
 
 async def _assert_single_and_404(client: TestClient, ref: Dict[str, Any]
                                  ) -> None:
+    from gallery.routes import _metadata_positive_prompt_normalized
+
     r = await client.get(f"/xyz/gallery/image/{ref['id_a']}")
     assert r.status == 200
     data = await r.json()
     assert data["filename"] == "a.png"
     assert data["folder"]["kind"] == "output"
     assert data["metadata"]["has_workflow"] is True
+    assert data["metadata"]["positive_prompt"] == "a cat on a mat"
+    assert data["metadata"]["positive_prompt_normalized"] == _metadata_positive_prompt_normalized(
+        "a cat on a mat"
+    )
     assert data["gallery"]["favorite"] is True
     assert "cat" in data["gallery"]["tags"]
     assert data["gallery"]["sync_status"] == "ok"

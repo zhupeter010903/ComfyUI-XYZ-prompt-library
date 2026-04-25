@@ -45,6 +45,7 @@ Boundary notes (ARCHITECTURE §2.1 / AI_RULES R5.5 / R7.1):
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import time
@@ -146,6 +147,20 @@ def _is_true(query, key: str, default: bool = False) -> bool:
     return raw.strip().lower() in _TRUE_TOKENS
 
 
+def _metadata_positive_prompt_normalized(
+    positive_prompt: Optional[str],
+) -> Optional[str]:
+    """§11 V1.1-F12 — same tokenisation as ``indexer``/``/images`` filter (T30/§8.8)."""
+    if not positive_prompt or not str(positive_prompt).strip():
+        return None
+    toks = _vocab.normalize_prompt(
+        str(positive_prompt), _prompt_extra_stopwords()
+    )
+    if not toks:
+        return None
+    return ", ".join(toks)
+
+
 def _serialize_image(rec: _repo.ImageRecord) -> dict:
     v_suffix = f"?v={rec.mtime_ns}" if rec.mtime_ns is not None else ""
     return {
@@ -167,6 +182,9 @@ def _serialize_image(rec: _repo.ImageRecord) -> dict:
         "created_at": _iso(rec.created_at),
         "metadata": {
             "positive_prompt": rec.positive_prompt,
+            "positive_prompt_normalized": _metadata_positive_prompt_normalized(
+                rec.positive_prompt
+            ),
             "negative_prompt": rec.negative_prompt,
             "model": rec.model,
             "seed": rec.seed,
@@ -213,6 +231,29 @@ def _prompt_extra_stopwords() -> frozenset:
         return frozenset()
 
 
+def _f05_query_underscores(s: str) -> str:
+    """§11 V1.1-F05 — query-side ``_`` → space before prompt normalisation."""
+    return str(s).replace("_", " ")
+
+
+def _parse_metadata_presence(raw: object) -> str:
+    if raw in (None, ""):
+        return "all"
+    v = str(raw).strip().lower()
+    if v not in ("all", "yes", "no"):
+        raise ValueError(f"invalid metadata_presence: {raw!r}")
+    return v
+
+
+def _parse_prompt_match_mode(raw: object) -> str:
+    if raw in (None, ""):
+        return "prompt"
+    v = str(raw).strip().lower()
+    if v not in ("prompt", "word", "string"):
+        raise ValueError(f"invalid prompt_match_mode: {raw!r}")
+    return v
+
+
 def _parse_filter(query) -> _repo.FilterSpec:
     fav = query.get("favorite", "all")
     if fav not in ("all", "yes", "no"):
@@ -222,6 +263,8 @@ def _parse_filter(query) -> _repo.FilterSpec:
         folder_id = int(fid_raw) if fid_raw not in (None, "") else None
     except ValueError as exc:
         raise ValueError(f"invalid folder_id: {fid_raw!r}") from exc
+    meta = _parse_metadata_presence(query.get("metadata_presence"))
+    pmm = _parse_prompt_match_mode(query.get("prompt_match_mode"))
     extra_sw = _prompt_extra_stopwords()
     tags_and_list: list[str] = []
     for t in query.getall("tag", []):
@@ -231,12 +274,32 @@ def _parse_filter(query) -> _repo.FilterSpec:
     tags_and = tuple(dict.fromkeys(tags_and_list))
 
     prompts_and_list: list[str] = []
-    for p in query.getall("prompt", []):
-        s = str(p).strip()
-        if not s:
-            continue
-        prompts_and_list.extend(_vocab.normalize_prompt(s, extra_sw))
+    words_and_list: list[str] = []
+    substrings_list: list[str] = []
+    if pmm == "word":
+        wire_frags: list[str] = []
+        for p in query.getall("prompt", []):
+            s_raw = str(p).strip()
+            if not s_raw:
+                continue
+            wire_frags.append(_f05_query_underscores(s_raw))
+        blob = ",".join(wire_frags)
+        words_and_list.extend(_vocab.split_positive_prompt_words(blob or None))
+    else:
+        for p in query.getall("prompt", []):
+            s_raw = str(p).strip()
+            if not s_raw:
+                continue
+            s = _f05_query_underscores(s_raw)
+            if pmm == "string":
+                seg = s.strip().lower()
+                if seg:
+                    substrings_list.append(seg)
+            else:
+                prompts_and_list.extend(_vocab.normalize_prompt(s, extra_sw))
     prompts_and = tuple(dict.fromkeys(prompts_and_list))
+    words_and = tuple(dict.fromkeys(words_and_list))
+    prompt_substrings = tuple(dict.fromkeys(substrings_list))
 
     return _repo.FilterSpec(
         name=(query.get("name") or None),
@@ -248,6 +311,10 @@ def _parse_filter(query) -> _repo.FilterSpec:
         recursive=_is_true(query, "recursive", default=False),
         tags_and=tags_and,
         prompts_and=prompts_and,
+        words_and=words_and,
+        metadata_presence=meta,
+        prompt_match_mode=pmm,
+        prompt_substrings=prompt_substrings,
     )
 
 
@@ -275,6 +342,8 @@ def _parse_filter_mapping(obj: Any) -> _repo.FilterSpec:
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid folder_id in filters") from exc
     recursive = bool(obj.get("recursive", False))
+    meta = _parse_metadata_presence(obj.get("metadata_presence"))
+    pmm = _parse_prompt_match_mode(obj.get("prompt_match_mode"))
     extra_sw = _prompt_extra_stopwords()
     tags_and_list: list[str] = []
     for t in (obj.get("tag_tokens") or obj.get("tags") or ()):
@@ -283,12 +352,31 @@ def _parse_filter_mapping(obj: Any) -> _repo.FilterSpec:
             tags_and_list.append(nt)
     tags_and = tuple(dict.fromkeys(tags_and_list))
     prompts_and_list: list[str] = []
-    for p in (obj.get("positive_tokens") or ()):
-        s = str(p).strip()
-        if not s:
-            continue
-        prompts_and_list.extend(_vocab.normalize_prompt(s, extra_sw))
+    words_and_list: list[str] = []
+    substrings_list: list[str] = []
+    if pmm == "word":
+        wire_frags = [
+            _f05_query_underscores(str(p).strip())
+            for p in (obj.get("positive_tokens") or ())
+            if str(p).strip()
+        ]
+        blob = ",".join(wire_frags)
+        words_and_list.extend(_vocab.split_positive_prompt_words(blob or None))
+    else:
+        for p in (obj.get("positive_tokens") or ()):
+            s_raw = str(p).strip()
+            if not s_raw:
+                continue
+            s = _f05_query_underscores(s_raw)
+            if pmm == "string":
+                seg = s.strip().lower()
+                if seg:
+                    substrings_list.append(seg)
+            else:
+                prompts_and_list.extend(_vocab.normalize_prompt(s, extra_sw))
     prompts_and = tuple(dict.fromkeys(prompts_and_list))
+    words_and = tuple(dict.fromkeys(words_and_list))
+    prompt_substrings = tuple(dict.fromkeys(substrings_list))
     return _repo.FilterSpec(
         name=name_val,
         favorite=fav,
@@ -299,6 +387,10 @@ def _parse_filter_mapping(obj: Any) -> _repo.FilterSpec:
         recursive=recursive,
         tags_and=tags_and,
         prompts_and=prompts_and,
+        words_and=words_and,
+        metadata_presence=meta,
+        prompt_match_mode=pmm,
+        prompt_substrings=prompt_substrings,
     )
 
 
@@ -430,6 +522,259 @@ async def _get_folders(request: web.Request) -> web.Response:
     return web.json_response([_serialize_folder(n) for n in tree])
 
 
+async def _post_folders(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    raw = body.get("path", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return _error(400, "invalid_body", "path must be a non-empty string")
+    try:
+        out = await _run(
+            _service.folder_register_custom_root,
+            raw.strip(), db_path=DB_PATH, data_dir=DATA_DIR,
+        )
+    except FileNotFoundError as exc:
+        return _error(404, "not_found", str(exc))
+    except PermissionError as exc:
+        return _error(403, "sandbox", str(exc))
+    except _folders.RootConflictError as exc:
+        return _error(409, "invalid_body", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("folder_register_custom_root failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("folder_register_custom_root failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out, status=201)
+
+
+async def _get_folder_delete_preview(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    try:
+        out = await _run(
+            _service.folder_delete_preview, folder_id, db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except PermissionError as exc:
+        return _error(403, "forbidden", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("folder_delete_preview failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("folder_delete_preview failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _delete_folder(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    purge_raw = (request.rel_url.query.get("purge_files") or "").lower()
+    purge = purge_raw in ("1", "true", "yes")
+    try:
+        row = await _run(
+            _repo.fetch_folder_row, db_path=DB_PATH, folder_id=folder_id,
+        )
+    except Exception as exc:
+        logger.exception("fetch_folder_row failed")
+        return _error(500, "internal", str(exc))
+    if row is None:
+        return _error(404, "not_found", f"folder {folder_id} not found")
+    try:
+        if row["parent_id"] is None:
+            if purge:
+                return _error(400, "invalid_body", "cannot purge-delete a root folder")
+            if int(row["removable"]) != 1:
+                return _error(403, "forbidden", "cannot remove built-in root")
+            await _run(
+                _service.folder_unregister_custom_root,
+                folder_id, db_path=DB_PATH, data_dir=DATA_DIR,
+            )
+        else:
+            if purge:
+                out = await _run(
+                    _service.folder_delete_purge, folder_id, db_path=DB_PATH,
+                )
+                return web.json_response(out, status=200)
+            await _run(
+                _service.folder_delete_empty, folder_id, db_path=DB_PATH,
+            )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except PermissionError as exc:
+        return _error(403, "forbidden", str(exc))
+    except FileNotFoundError as exc:
+        return _error(404, "not_found", str(exc))
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.ENOTEMPTY:
+            return _error(409, "not_empty", str(exc))
+        logger.exception("folder delete failed")
+        return _error(500, "internal", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("folder delete failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("folder delete failed")
+        return _error(500, "internal", str(exc))
+    return web.Response(status=204)
+
+
+async def _post_folder_rescan(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    try:
+        await _run(_service.folder_schedule_rescan, folder_id, db_path=DB_PATH)
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except Exception as exc:
+        logger.exception("folder rescan schedule failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response({"scheduled": True})
+
+
+async def _post_folder_mkdir(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    name = body.get("name", None)
+    if not isinstance(name, str) or not name.strip():
+        return _error(400, "invalid_body", "name must be a non-empty string")
+    try:
+        out = await _run(
+            _service.folder_mkdir, folder_id, name.strip(), db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except FileExistsError as exc:
+        return _error(409, "conflict", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("folder_mkdir failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("folder_mkdir failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out, status=201)
+
+
+async def _patch_folder(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    name = body.get("name", None)
+    if not isinstance(name, str) or not name.strip():
+        return _error(400, "invalid_body", "name must be a non-empty string")
+    try:
+        await _run(
+            _service.folder_rename, folder_id, name.strip(), db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except PermissionError as exc:
+        return _error(403, "forbidden", str(exc))
+    except FileExistsError as exc:
+        return _error(409, "conflict", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("folder_rename failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("folder_rename failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response({"ok": True})
+
+
+async def _post_folder_move(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    pid = body.get("parent_id", None)
+    if isinstance(pid, bool):
+        return _error(400, "invalid_body", "parent_id must be an int")
+    try:
+        pid_i = int(pid)
+    except (TypeError, ValueError):
+        return _error(400, "invalid_body", "parent_id must be an int")
+    try:
+        await _run(
+            _service.folder_move, folder_id, pid_i, db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except PermissionError as exc:
+        return _error(403, "forbidden", str(exc))
+    except FileExistsError as exc:
+        return _error(409, "conflict", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("folder_move failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("folder_move failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response({"ok": True})
+
+
+async def _post_folder_open(request: web.Request) -> web.Response:
+    folder_id = int(request.match_info["id"])
+    try:
+        await _run(_service.folder_open_in_os, folder_id, db_path=DB_PATH)
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    except RuntimeError as exc:
+        return _error(500, "internal", str(exc))
+    except Exception as exc:
+        logger.exception("folder_open_in_os failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response({"ok": True})
+
+
 async def _list_images(request: web.Request) -> web.Response:
     try:
         flt = _parse_filter(request.query)
@@ -517,9 +862,32 @@ def _parse_vocab_limit(query) -> int:
     return max(1, min(v, _repo.VOCAB_LOOKUP_MAX_LIMIT))
 
 
+def _parse_vocab_match_mode(query) -> str:
+    """Autocomplete SQL mode: ``prefix`` (default) or ``contains`` (substring)."""
+    raw = (query.get("match") or "prefix").strip().lower()
+    if raw in ("prefix", "contains"):
+        return raw
+    raise ValueError(f"invalid match: {query.get('match')!r}")
+
+
+_DOWNLOAD_VARIANTS = frozenset({"full", "no_workflow", "clean"})
+
+
+def _effective_download_variant(request: web.Request) -> str:
+    raw = request.query.get("variant")
+    if raw is not None and str(raw).strip() != "":
+        v = str(raw).strip()
+        if v not in _DOWNLOAD_VARIANTS:
+            raise ValueError(f"invalid variant: {raw!r}")
+        return v
+    prefs = _folders.get_gallery_preferences(data_dir=DATA_DIR)
+    return str(prefs.get("download_variant") or "full")
+
+
 async def _get_vocab_tags(request: web.Request) -> web.Response:
     try:
         limit = _parse_vocab_limit(request.query)
+        match_mode = _parse_vocab_match_mode(request.query)
     except ValueError as exc:
         return _error(400, "invalid_query", str(exc))
     prefix = request.query.get("prefix", "")
@@ -527,6 +895,7 @@ async def _get_vocab_tags(request: web.Request) -> web.Response:
         rows = await _run(
             _repo.vocab_lookup,
             db_path=DB_PATH, kind="tags", prefix=prefix, limit=limit,
+            match_mode=match_mode,
         )
     except ValueError as exc:
         return _error(400, "invalid_query", str(exc))
@@ -539,6 +908,7 @@ async def _get_vocab_tags(request: web.Request) -> web.Response:
 async def _get_vocab_prompts(request: web.Request) -> web.Response:
     try:
         limit = _parse_vocab_limit(request.query)
+        match_mode = _parse_vocab_match_mode(request.query)
     except ValueError as exc:
         return _error(400, "invalid_query", str(exc))
     prefix = request.query.get("prefix", "")
@@ -546,11 +916,34 @@ async def _get_vocab_prompts(request: web.Request) -> web.Response:
         rows = await _run(
             _repo.vocab_lookup,
             db_path=DB_PATH, kind="prompts", prefix=prefix, limit=limit,
+            match_mode=match_mode,
         )
     except ValueError as exc:
         return _error(400, "invalid_query", str(exc))
     except Exception as exc:
         logger.exception("vocab_lookup prompts failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(list(rows))
+
+
+async def _get_vocab_words(request: web.Request) -> web.Response:
+    """§11 F04 *word* mode autocomplete — ``word_token`` lexemes."""
+    try:
+        limit = _parse_vocab_limit(request.query)
+        match_mode = _parse_vocab_match_mode(request.query)
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    prefix = request.query.get("prefix", "")
+    try:
+        rows = await _run(
+            _repo.vocab_lookup,
+            db_path=DB_PATH, kind="words", prefix=prefix, limit=limit,
+            match_mode=match_mode,
+        )
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    except Exception as exc:
+        logger.exception("vocab_lookup words failed")
         return _error(500, "internal", str(exc))
     return web.json_response(list(rows))
 
@@ -653,7 +1046,196 @@ async def _get_raw_inline(request: web.Request) -> web.StreamResponse:
 
 
 async def _get_raw_download(request: web.Request) -> web.StreamResponse:
-    return await _serve_raw(request, as_attachment=True)
+    """``GET …/raw/{id}/download`` — optional ``?variant=full|no_workflow|clean`` (T35)."""
+    try:
+        variant = _effective_download_variant(request)
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    if variant == "full":
+        return await _serve_raw(request, as_attachment=True)
+    image_id = int(request.match_info["id"])
+    try:
+        rec = await _run(_repo.get_image, image_id, db_path=DB_PATH)
+    except Exception as exc:
+        logger.exception("get_image for raw download failed")
+        return _error(500, "internal", str(exc))
+    if rec is None:
+        return _error(404, "not_found", f"image {image_id} not found")
+    try:
+        roots = await _run(_folders.list_roots, db_path=DB_PATH)
+        root_paths = [r["path"] for r in roots]
+        await _run(_paths.assert_inside_root, rec.path, root_paths)
+    except _paths.SandboxError as exc:
+        return _error(403, "sandbox", str(exc))
+    disk_path = Path(rec.path)
+    if not disk_path.is_file():
+        return _error(404, "not_found",
+                      f"file missing on disk: image {image_id}")
+    if disk_path.suffix.lower() != ".png":
+        return _error(
+            400,
+            "invalid_query",
+            "download variants no_workflow/clean apply to PNG files only",
+        )
+    try:
+        body = await _run(_metadata.build_png_download_bytes, disk_path, variant)
+    except FileNotFoundError:
+        return _error(404, "not_found", f"file missing on disk: image {image_id}")
+    except ValueError as exc:
+        return _error(400, "invalid_query", str(exc))
+    except Exception as exc:
+        logger.exception("build_png_download_bytes failed")
+        return _error(500, "internal", str(exc))
+    headers = {
+        "Content-Disposition": _content_disposition_attachment(
+            rec.filename, image_id,
+        ),
+        "Content-Type": "image/png",
+    }
+    return web.Response(body=body, headers=headers)
+
+
+async def _get_gallery_preferences(_request: web.Request) -> web.Response:
+    try:
+        out = await _run(_folders.get_gallery_preferences, data_dir=DATA_DIR)
+    except Exception as exc:
+        logger.exception("get_gallery_preferences failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _patch_gallery_preferences(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    try:
+        out = await _run(_folders.patch_gallery_preferences, data_dir=DATA_DIR, body=body)
+    except Exception as exc:
+        logger.exception("patch_gallery_preferences failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _get_admin_tags(request: web.Request) -> web.Response:
+    q = request.query.get("q", "")
+    lim_raw = request.query.get("limit", "10")
+    off_raw = request.query.get("offset", "0")
+    sort_key = (request.query.get("sort") or "usage").strip().lower()
+    sort_dir = (request.query.get("dir") or "desc").strip().lower()
+    if sort_key not in ("name", "usage"):
+        return _error(400, "invalid_query", "sort must be name or usage")
+    if sort_dir not in ("asc", "desc"):
+        return _error(400, "invalid_query", "dir must be asc or desc")
+    try:
+        limit = int(lim_raw)
+    except ValueError:
+        return _error(400, "invalid_query", "limit must be an integer")
+    try:
+        offset = int(off_raw)
+    except ValueError:
+        return _error(400, "invalid_query", "offset must be an integer")
+    try:
+        body = await _run(
+            _service.tag_admin_list,
+            db_path=DB_PATH,
+            query=str(q),
+            limit=limit,
+            offset=offset,
+            sort_key=sort_key,
+            sort_dir=sort_dir,
+        )
+    except Exception as exc:
+        logger.exception("tag_admin_list failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(body)
+
+
+async def _post_admin_tags_delete(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    raw = body.get("name", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return _error(400, "invalid_body", "name must be a non-empty string")
+    try:
+        out = await _run(
+            _service.tag_admin_delete, name=raw.strip(), db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("tag_admin_delete failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("tag_admin_delete failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_admin_tags_purge_zero(request: web.Request) -> web.Response:
+    try:
+        await request.json()
+    except json.JSONDecodeError:
+        pass
+    try:
+        out = await _run(_service.tag_admin_purge_zero, db_path=DB_PATH)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("tag_admin_purge_zero failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("tag_admin_purge_zero failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_admin_tags_rename(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+    old_n = body.get("old_name")
+    new_n = body.get("new_name")
+    if not isinstance(old_n, str) or not old_n.strip():
+        return _error(400, "invalid_body", "old_name must be a non-empty string")
+    if not isinstance(new_n, str) or not new_n.strip():
+        return _error(400, "invalid_body", "new_name must be a non-empty string")
+    try:
+        out = await _run(
+            _service.tag_admin_rename,
+            old_name=old_n.strip(),
+            new_name=new_n.strip(),
+            db_path=DB_PATH,
+        )
+    except KeyError as exc:
+        return _error(404, "not_found", str(exc))
+    except ValueError as exc:
+        return _error(400, "invalid_body", str(exc))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "WriteQueue is not started" in msg or "not started" in msg:
+            return _error(503, "not_ready", msg)
+        logger.exception("tag_admin_rename failed")
+        return _error(500, "internal", msg)
+    except Exception as exc:
+        logger.exception("tag_admin_rename failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
 
 
 def _ws_pong_envelope() -> str:
@@ -1114,8 +1696,19 @@ def register(server) -> None:
     routes.get("/xyz/gallery")(_serve_spa)
     routes.get(r"/xyz/gallery/static/{tail:.*}")(_serve_static)
     routes.get("/xyz/gallery/folders")(_get_folders)
+    routes.post("/xyz/gallery/folders")(_post_folders)
+    routes.get(r"/xyz/gallery/folders/{id:\d+}/delete-preview")(
+        _get_folder_delete_preview,
+    )
+    routes.delete(r"/xyz/gallery/folders/{id:\d+}")(_delete_folder)
+    routes.post(r"/xyz/gallery/folders/{id:\d+}/rescan")(_post_folder_rescan)
+    routes.post(r"/xyz/gallery/folders/{id:\d+}/mkdir")(_post_folder_mkdir)
+    routes.patch(r"/xyz/gallery/folders/{id:\d+}")(_patch_folder)
+    routes.post(r"/xyz/gallery/folders/{id:\d+}/move")(_post_folder_move)
+    routes.post(r"/xyz/gallery/folders/{id:\d+}/open")(_post_folder_open)
     routes.get("/xyz/gallery/vocab/tags")(_get_vocab_tags)
     routes.get("/xyz/gallery/vocab/prompts")(_get_vocab_prompts)
+    routes.get("/xyz/gallery/vocab/words")(_get_vocab_words)
     routes.get("/xyz/gallery/vocab/models")(_get_vocab_models)
     routes.get("/xyz/gallery/index/status")(_get_index_status)
     routes.get("/xyz/gallery/images")(_list_images)
@@ -1129,6 +1722,12 @@ def register(server) -> None:
     routes.get(r"/xyz/gallery/thumb/{id:\d+}")(_get_thumb)
     routes.get(r"/xyz/gallery/raw/{id:\d+}")(_get_raw_inline)
     routes.get(r"/xyz/gallery/raw/{id:\d+}/download")(_get_raw_download)
+    routes.get("/xyz/gallery/preferences")(_get_gallery_preferences)
+    routes.patch("/xyz/gallery/preferences")(_patch_gallery_preferences)
+    routes.get("/xyz/gallery/admin/tags")(_get_admin_tags)
+    routes.post("/xyz/gallery/admin/tags/delete")(_post_admin_tags_delete)
+    routes.post("/xyz/gallery/admin/tags/purge_zero")(_post_admin_tags_purge_zero)
+    routes.post("/xyz/gallery/admin/tags/rename")(_post_admin_tags_rename)
     routes.get("/xyz/gallery/ws")(_ws_handler)
     routes.post("/xyz/gallery/bulk/resolve_selection")(_post_bulk_resolve_selection)
     routes.post("/xyz/gallery/bulk/favorite")(_post_bulk_favorite)

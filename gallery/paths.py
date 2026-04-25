@@ -13,9 +13,17 @@ Out of scope (deferred):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Union
+from typing import Iterable, List, Union
 
-__all__ = ["SandboxError", "assert_inside_root"]
+__all__ = [
+    "SandboxError",
+    "assert_inside_root",
+    "is_derivative_path_excluded",
+    "prune_derivative_walk_dirnames",
+]
+
+# T29 / V1.1-F11 — keep in sync with indexer walk pruning.
+_DERIVATIVE_EXCLUDED_DIR_NAMES: frozenset = frozenset({"_thumbs"})
 
 _PathLike = Union[str, Path]
 
@@ -47,3 +55,34 @@ def assert_inside_root(path: _PathLike, roots: Iterable[_PathLike]) -> Path:
     raise SandboxError(
         f"path {str(resolved)!r} is not inside any registered root"
     )
+
+
+def is_derivative_path_excluded(abs_path: str, root_path: str) -> bool:
+    """True when ``abs_path`` is under a barred derivative directory (T29).
+
+    Matches any path component (directory segment) equal to ``_thumbs``
+    under ``root_path``. Folder-only paths such as ``…/output/_thumbs``
+    (single relative segment) are included.
+    """
+    try:
+        root_r = Path(str(root_path)).resolve(strict=False)
+        abs_r = Path(str(abs_path)).resolve(strict=False)
+        rel = abs_r.relative_to(root_r)
+    except (ValueError, OSError):
+        return False
+    parts = rel.parts
+    if not parts:
+        return False
+    to_scan = parts[:-1] if len(parts) > 1 else parts
+    for seg in to_scan:
+        if str(seg).casefold() in _DERIVATIVE_EXCLUDED_DIR_NAMES:
+            return True
+    return False
+
+
+def prune_derivative_walk_dirnames(dirnames: List[str]) -> None:
+    """Drop ``_thumbs`` (case-insensitive) from ``os.walk`` descent (T29)."""
+    dirnames[:] = [
+        d for d in dirnames
+        if str(d).casefold() not in _DERIVATIVE_EXCLUDED_DIR_NAMES
+    ]

@@ -17,6 +17,8 @@ function filterWire() {
     date_before: f.date_before || '',
     folder_id: f.folder_id,
     recursive: !!f.recursive,
+    metadata_presence: f.metadata_presence || 'all',
+    prompt_match_mode: f.prompt_match_mode || 'prompt',
   };
 }
 

@@ -93,6 +93,7 @@ async def _assert_static_app_js(client: TestClient) -> None:
     assert "mount('#app')" in body or 'mount("#app")' in body, body[:300]
     # Hash routing evidence — '#/image/:id' pattern lives in app.js.
     assert "hashchange" in body, "hash router missing"
+    assert "/settings" in body and "SettingsView" in body, "settings route missing"
     print("T11 /static/app.js served OK")
 
 
@@ -111,6 +112,8 @@ async def _assert_static_api_js(client: TestClient) -> None:
     # per gallery/routes.py _error().
     assert "data.error" in body, "error envelope parsing missing"
     assert "/xyz/gallery" in body, "BASE URL missing"
+    assert "downloadImage" in body, "T35 downloadImage missing"
+    assert "fetchGalleryPreferences" in body, "preferences GET helper missing"
     print("T11 /static/api.js served OK")
 
 

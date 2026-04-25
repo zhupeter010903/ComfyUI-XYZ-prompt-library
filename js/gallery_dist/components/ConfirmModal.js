@@ -10,11 +10,13 @@ export const ConfirmModal = defineComponent({
     cancelLabel: { type: String, default: 'Cancel' },
     danger: { type: Boolean, default: false },
     busy: { type: Boolean, default: false },
+    /** When true, confirm is disabled but cancel stays enabled (unless ``busy``). */
+    confirmDisabled: { type: Boolean, default: false },
   },
   emits: ['confirm', 'cancel'],
   setup(props, { emit }) {
     function onConfirm() {
-      if (!props.busy) emit('confirm');
+      if (!props.busy && !props.confirmDisabled) emit('confirm');
     }
     function onCancel() {
       if (!props.busy) emit('cancel');
@@ -33,7 +35,7 @@ export const ConfirmModal = defineComponent({
         </div>
         <footer class="cm-foot">
           <button type="button" class="cm-btn" :disabled="busy" @click="onCancel">{{ cancelLabel }}</button>
-          <button type="button" class="cm-btn" :class="{ 'cm-btn-danger': danger }" :disabled="busy" @click="onConfirm">{{ confirmLabel }}</button>
+          <button type="button" class="cm-btn" :class="{ 'cm-btn-danger': danger }" :disabled="busy || confirmDisabled" @click="onConfirm">{{ confirmLabel }}</button>
         </footer>
       </div>
     </div>

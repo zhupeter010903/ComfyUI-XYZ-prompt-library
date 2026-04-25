@@ -5,6 +5,8 @@
 > aiohttp routing surface of the host plugin, but is otherwise independent of
 > the existing nodes.
 
+> **Document layering（只增不改旧文）**：MVP（v1.0）正文保持有效；**v1.1** 增量以 §11 *v1.1 Overrides* 为准。若与较早章节字面冲突，以 §11 为**覆盖**说明，旧句视为 **deprecated** 并在 §11 中指明。
+
 ---
 
 ## 1. Overview
@@ -43,7 +45,7 @@ Vertical stack of controls; collapse state is persisted per browser.
 
 | ID    | Control                | Behaviour                                                                                                                                                                                                                                                                  |
 | ----- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| FR-3a | **Name filter**        | Label `name filter:` + text input. Case-insensitive substring match against filename. Debounced (250 ms).                                                                                                                                                                   |
+| FR-3a | **Name filter**        | Label `name filter:` + text input. Case-insensitive match on lowercased basename (`filename_lc`): trimmed query **length &lt; 3** → **prefix** match (`LIKE 'q%'`); **length ≥ 3** → **substring** match (`LIKE '%q%'`). Debounced (250 ms). (*Updated due to runtime implementation / QA feedback* — previously stated substring-only.)                                                                                                                                                                   |
 | FR-3b | **Positive prompt**    | Label `positive prompt filter:` + text input. Comma-separated tokens; matches images whose positive prompt contains **all** tokens (AND semantics). While typing the **current** token, show top-20 autocomplete suggestions sourced from the indexed prompt vocabulary. Click a suggestion to complete the current token. |
 | FR-3c | **Tag filter**         | Same UX as FR-3b but matches against the gallery-managed `tags` field. Suggestions sourced from the tag vocabulary.                                                                                                                                                        |
 | FR-3d | **Favorite filter**    | Label `favorite filter:` + dropdown: `all` / `favorite` / `not favorite`.                                                                                                                                                                                                  |
@@ -52,6 +54,10 @@ Vertical stack of controls; collapse state is persisted per browser.
 
 * FR-4 All filters compose with AND semantics. The filter state is
   reflected in the URL query string (sharable / bookmarkable).
+
+* **Reset control** (*Updated due to runtime implementation / QA feedback*): A **Reset** action restores filter fields (name / prompt / tag / favorite / model / dates / metadata presence / prompt match mode) and **SortSpec** to defaults **without** changing the selected **`folder_id`** or the **recursive** toggle — folder tree context is preserved.
+
+* **Resizable sidebar chrome** (*Updated due to runtime implementation / QA feedback*): The user may adjust **sidebar width** and the **vertical split** between the filter block and the folder tree; dimensions are persisted in browser **`localStorage`** under namespaced keys (`xyz_gallery.*`). The filter control stack scrolls inside its pane when content exceeds the allocated height.
 
 #### 2.2.2 Folder panel (below filters)
 
@@ -493,6 +499,7 @@ ImageRecord {
     created_at: ISO-8601
     metadata: {
         positive_prompt: str | null
+        positive_prompt_normalized: str | null  // comma+space-joined tokens (normalize_prompt + prompt_stopwords, same as T30/indexer); V1.1-F12 (*Updated due to runtime implementation / QA feedback*)
         negative_prompt: str | null
         model: str | null
         seed: int | null
@@ -625,6 +632,8 @@ request/response unless noted.
 | GET    | `/xyz/gallery/raw/{id}/download`        | Same content; `Content-Disposition: attachment`.                                 |
 | GET    | `/xyz/gallery/image/{id}/workflow.json` | Extracted workflow; 404 if absent.                                               |
 
+> **Updated due to runtime implementation / QA feedback**: `GET /raw/{id}/download` accepts **`?variant=full|no_workflow|clean`**; when omitted, effective variant follows **`gallery_config.json`** / **`GET|PATCH /preferences`** (`download_variant`). Re-encoded responses apply **`metadata.build_png_download_bytes`** for `no_workflow` / `clean`: **`clean`** strips **`workflow`**, API **`prompt`**, A1111 **`parameters`**, and all **`xyz_gallery.*`** text chunks (pixels unchanged).
+
 ### 7.5 Mutations — single image
 
 | Method | Path                                          | Body                                            | Notes |
@@ -680,7 +689,7 @@ Event envelope:
 | `image.upserted`    | `ImageRecord` (compact)                           | After indexing a new or modified file           |
 | `image.deleted`     | `{ "id": int, "path": str }`                      | After a file is removed from disk               |
 | `image.updated`     | `{ "id": int, "favorite"?, "tags"?, "moved_to"? }`| After a mutation API call                       |
-| `folder.changed`    | `FolderNode` (subtree)                            | After a folder add/remove/rename                |
+| `folder.changed`    | `{ "root_id": int }` — client SHOULD `GET /folders` to refresh the tree (`FolderNode` payload comes from HTTP, not inline in WS). *Updated due to runtime implementation / QA feedback.* | After `folder` rows under that root were reconciled with disk (add/remove subdirs) |
 | `index.progress`    | `{ done, total, phase }`                          | During a full scan / rebuild                    |
 | `vocab.changed`     | `{ "kind": "tag"\|"prompt", "added":[], "removed":[] }` | After tag/prompt vocab deltas             |
 
@@ -940,10 +949,9 @@ The exact same construction is used for prompt tokens against
 expressed as additional `EXISTS` clauses against the second table —
 SQLite's planner happily reuses the same driving row.
 
-* Name substring filter:
-  * length < 3 chars → simple `LIKE '%x%'` on `filename_lc` (acceptable
-    even at 50 k rows because `filename_lc` is < 100 bytes/row),
-  * length ≥ 3 chars → FTS5 `MATCH 'x*'` for prefix tokens.
+* Name filter on `filename_lc` (*Updated due to runtime implementation / QA feedback* — earlier text inverted the length rule vs `repo._build_filter` and assumed FTS5 on the MVP path):
+  * trimmed length **< 3** → **prefix** `LIKE 'needle%'` (B-tree friendly on `filename_lc`),
+  * trimmed length **≥ 3** → **substring** `LIKE '%needle%'` (MVP; **T28** may move this to FTS5 / `image_fts`).
 * Sorting + pagination is **cursor-based** on `(sort_key, id)` — never
   `OFFSET` — so deep scrolling stays O(log N).
 * Counts: server returns an **estimate** for very large result sets
@@ -1132,6 +1140,7 @@ query time (filter input) — therefore goes through a single
    `[word:0.7]` → `word`, nested `((word))` → `word`. The numeric
    weight itself is discarded.
 4. **Strip leftover grouping punctuation** — `()`, `[]`, `{}`, `\`.
+   > **v1.1 deprecation（§11）**：本条整段行为**废弃**。归一化流水线须**保留**分组字符与转义括号场景（例：`yd \(orange maru\)` 进入词表 / DB 时不得因本步被抹平）。实现上删除本步或改为 no-op；需配合 **full re-derive** `prompt_token` / `image_prompt_token`（见 §11）。
 5. **Split on commas and `|`** — these are the only real token
    separators in SD-style prompts.
 6. **Per-token clean-up** — collapse internal whitespace, trim
@@ -1254,3 +1263,51 @@ Two consequences worth calling out:
 5. **Custom folder sandbox**: should we forbid registering a custom
    folder that is an ancestor / descendant of an already-registered
    one (to avoid double-indexing)? Default = **forbid overlap**.
+
+---
+
+## 11. v1.1 Overrides（post-MVP，pre-L4）
+
+> 来源：`gallery_update_description.md`（gallery 初始版本全覆盖后的增量意见）。  
+> 分类标签：**DM** = 数据模型 / 索引；**API** = HTTP / 查询语义 / 后台行为；**UI** = 前端交互与视觉。
+
+### 11.1 变更清单与分类
+
+| ID | 摘要 | DM | API | UI |
+| --- | --- | --- | --- | --- |
+| V1.1-F01 | 目录树：文件夹可折叠；右键改名 / 移动 / 删除 / 创建子文件夹；（可选）在 OS 中打开 | ○ | ● | ● |
+| V1.1-F02 | Light / Dark 主题切换 | | | ● |
+| V1.1-F03 | 过滤器增加：`all` / **有** ComfyUI metadata / **无** ComfyUI metadata | ● | ● | ● |
+| V1.1-F04 | Prompt 过滤拆三种：**match prompt**（逗号分隔精确 token）、**match word**（空格分词）、**match string**（子串含无空格粘连）；各自自动补全策略（prompt/word 联想，string 不联想） | ● | ● | ● |
+| V1.1-F05 | 数据库 / 查询侧：将 `_` **规范化**为空格（与既有 `normalize_prompt` / 存储策略对齐；具体落在索引列、迁移或查询层由 TASKS 固化） | ● | ● | ○ |
+| V1.1-F06 | 缩略图网格多选：鼠标拖拽框选 + Shift 范围选择（Windows 风格） | | | ● |
+| V1.1-F07 | 拖拽缩略图（单张或当前多选）到左侧目录 → **移动** | | ● | ● |
+| V1.1-F08 | 右键缩略图：改名、移动、删除 | | ● | ● |
+| V1.1-F09 | 多选模式下顶栏：集体移动 / 删除 / 统一增减 tag / 统一 favorite | | ● | ● |
+| V1.1-F10 | Detail：可改图片名、tag、favorite（与 PATCH 语义一致） | | ● | ● |
+| V1.1-F11 | **`output/_thumbs`**（及同类）不得作为画廊图源：缩略图缓存迁至 `gallery_data`/可控目录；非画廊用途文件删除或排除索引 | ● | ● | ○ |
+| V1.1-F12 | Detail：positive prompt 展示切换「PNG 原文」vs「DB 归一化后」 | | | ● |
+| V1.1-F13 | 移除 §8.8 流水线第 4 步（见上文 **deprecated** 标注）；重组 `prompt_token` | ● | ● | ○ |
+| V1.1-F14 | Detail 右栏：gallery 相关 metadata **置顶**显示 | | | ● |
+| V1.1-F15 | Settings 子页：开发者模式开关；下载策略（全 metadata / 无 workflow / clean copy）+ 自定义下载路径；过滤器「可见性」按项 checkbox；tag 管理（搜、删、清理 usage=0、重命名级联）；自定义图库根路径管理（**不得**改动内置 output/input 根） | ● | ● | ● |
+| V1.1-F16 | 右键 / Detail / 批量选择：**下载**（策略由 Settings 统一） | | ● | ● |
+| V1.1-F17 | 视觉整体美化（含滚动条、配色、字体、组件布局；参考 Apple 相册） | | | ● |
+
+> **Updated due to runtime implementation / QA feedback (F15–F16)**：**Settings** 为 hash **overlay**（`#/settings`、`#/image/{id}/settings`），与 **MainView/DetailView** 同屏；顶栏在设置打开时保持；遮罩点击关闭。下载偏好含 **`download_prompt_each_time`**（每笔下载前弹窗选 `variant`）与持久化 **`download_variant`** / **`download_basename_prefix`**。**`GET /xyz/gallery/admin/tags`** 返回 **`{ "tags": [...], "total": int }`**，分页参数 **`limit`/`offset`**（默认 **`limit=10`**）。详见 `TASKS.md` **T35/T36** *Scope supplement*。
+
+### 11.2 与 L4（性能层）关系 — **何种变更阻塞 L4**
+
+以下完成后或明确并行策略前，**暂缓启动** `TASKS.md` 中 **T26–T28（MVP-L4）**，以免双重迁移与性能调优白费：
+
+| 阻塞原因 | 关联项 |
+| --- | --- |
+| 索引集合与磁盘布局若仍含「衍生物目录 / 错误缓存 PNG」则 LRU、进程池与 FTS 重建口径不稳定 | **V1.1-F11**（及 TASKS **T29**） |
+| `prompt_token` 语义变更会迫使全量重扫 / 重链 junction，应在 FTS5（T28）与 ProcessPool（T27）之前冻结 | **V1.1-F05、V1.1-F13**（及 TASKS **T30–T31**） |
+| 下载与 PNG 重写策略若仍变动，`metadata_sync` 热路径与二进制输出形态未稳定 | **V1.1-F15–F16**（与实现批次相关；若仅客户端侧下载可并行） |
+
+**不阻塞 L4 的项**：纯 UI（**F02、F06、F14、F17** 中与数据无关部分）、仅主视图过滤器展示开关（**F15** 子集）——可与 L4 并行，但需在 SPEC/TASKS 标注依赖以免合并冲突。
+
+### 11.3 Backward compatibility
+
+- v1.0 行为在 §8.8 第 4 步等处仍可在代码中读到；**v1.1** 通过 **§11 + 代码注释 `@deprecated v1.0`** 双重标记迁移路径。
+- `gallery_update_description.md` 列为需求溯源；实现验收以本文 §11 与 `TASKS.md` Pre-L4 阶段为准。

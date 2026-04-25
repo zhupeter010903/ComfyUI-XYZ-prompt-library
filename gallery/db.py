@@ -251,9 +251,33 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             )
 
 
+# -- Schema v6 — §11 F04 word-mode lexeme vocab (parallel to ``prompt_token``) --
+
+_V6_DDL = """
+CREATE TABLE IF NOT EXISTS word_token (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    token         TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    usage_count   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS image_word_token (
+    image_id      INTEGER NOT NULL REFERENCES image(id) ON DELETE CASCADE,
+    token_id      INTEGER NOT NULL REFERENCES word_token(id) ON DELETE CASCADE,
+    PRIMARY KEY (image_id, token_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_word_token_token
+    ON image_word_token(token_id, image_id);
+"""
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V6_DDL)
+
+
 # -- Migration framework ----------------------------------------------------
 
-# Forward-only ledger. ``5`` = canonical ``image.model`` extension strip (T21).
+# Forward-only ledger. ``6`` = word_token / image_word_token (§11 F04 word).
 # FTS5 / T28 will append later steps (see module docstring).
 MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1,
@@ -261,6 +285,7 @@ MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_v3,
     4: _migrate_v4,
     5: _migrate_v5,
+    6: _migrate_v6,
 }
 
 SCHEMA_VERSION: int = max(MIGRATIONS)

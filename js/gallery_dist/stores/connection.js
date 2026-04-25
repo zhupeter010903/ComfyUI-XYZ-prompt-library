@@ -8,6 +8,7 @@ const EV = {
   SYNC: 'image.sync_status_changed',
   INDEX_PROGRESS: 'index.progress',
   DRIFT: 'index.drift_detected',
+  FOLDER_CHANGED: 'folder.changed',
   BULK: 'bulk.progress',
   BULK_DONE: 'bulk.completed',
   PONG: 'pong',

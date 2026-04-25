@@ -37,8 +37,12 @@ __all__ = [
     "ensure_default_roots",
     "add_root",
     "list_roots",
+    "remove_root_from_config",
     "RootConflictError",
     "CONFIG_FILENAME",
+    "get_gallery_preferences",
+    "patch_gallery_preferences",
+    "normalize_download_variant",
 ]
 
 _PathLike = Union[str, Path]
@@ -56,8 +60,30 @@ _WRITE_TIMEOUT_SEC = 5.0
 _DEFAULT_CONFIG: Dict[str, Any] = {
     "roots": [],
     "prompt_stopwords": [],
-    "vocab_version": 1,
+    "vocab_version": 2,
+    # T35 / T36 — PNG download variant for ``GET …/raw/{id}/download`` default
+    # (query ``?variant=`` overrides). Values: full | no_workflow | clean.
+    "download_variant": "full",
+    # When true, SPA prompts per download; when false, ``download_variant`` applies.
+    "download_prompt_each_time": False,
+    # T36 — optional filename prefix for client-side ``download`` attribute.
+    "download_basename_prefix": "",
+    "developer_mode": False,
+    "theme": "dark",
+    "filter_visibility": {
+        "name": True,
+        "metadata_presence": True,
+        "prompt_mode": True,
+        "prompt_tokens": True,
+        "tags": True,
+        "favorite": True,
+        "model": True,
+        "dates": True,
+    },
 }
+
+_DOWNLOAD_VARIANTS = frozenset({"full", "no_workflow", "clean"})
+_THEME_ALLOWED = frozenset({"dark", "light"})
 
 
 class RootConflictError(ValueError):
@@ -252,3 +278,93 @@ def add_root(path: _PathLike, *, db_path: _PathLike, data_dir: _PathLike,
 def list_roots(*, db_path: _PathLike) -> List[Dict[str, Any]]:
     """Return all registered roots (``parent_id IS NULL``) from the DB."""
     return _select_existing_roots(db_path)
+
+
+def normalize_download_variant(raw: Optional[Any]) -> str:
+    """Return a safe ``download_variant`` string (T35)."""
+    s = str(raw or "").strip()
+    return s if s in _DOWNLOAD_VARIANTS else "full"
+
+
+def normalize_theme(raw: Optional[Any]) -> str:
+    s = str(raw or "").strip().lower()
+    return s if s in _THEME_ALLOWED else "dark"
+
+
+def _sanitize_download_basename_prefix(raw: Optional[Any]) -> str:
+    s = str(raw or "").strip()[:64]
+    out: List[str] = []
+    for ch in s:
+        if ch.isalnum() or ch in "-_.":
+            out.append(ch)
+    return "".join(out)[:64]
+
+
+def _merge_filter_visibility(raw: Any) -> Dict[str, bool]:
+    base = dict(_DEFAULT_CONFIG["filter_visibility"])
+    if not isinstance(raw, dict):
+        return base
+    for k, default_v in base.items():
+        if k in raw:
+            base[k] = bool(raw[k])
+    return base
+
+
+def get_gallery_preferences(*, data_dir: _PathLike) -> Dict[str, Any]:
+    """Subset of ``gallery_config.json`` exposed to the SPA (T36)."""
+    cfg = _load_config(Path(data_dir))
+    return {
+        "download_variant": normalize_download_variant(cfg.get("download_variant")),
+        "download_prompt_each_time": bool(cfg.get("download_prompt_each_time")),
+        "download_basename_prefix": _sanitize_download_basename_prefix(
+            cfg.get("download_basename_prefix"),
+        ),
+        "developer_mode": bool(cfg.get("developer_mode")),
+        "theme": normalize_theme(cfg.get("theme")),
+        "filter_visibility": _merge_filter_visibility(cfg.get("filter_visibility")),
+    }
+
+
+def patch_gallery_preferences(
+    *, data_dir: _PathLike, body: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge known preference keys and persist (T36). Unknown keys ignored."""
+    cfg = _load_config(Path(data_dir))
+    if not isinstance(body, dict):
+        body = {}
+    if "download_variant" in body:
+        cfg["download_variant"] = normalize_download_variant(body.get("download_variant"))
+    if "download_prompt_each_time" in body:
+        cfg["download_prompt_each_time"] = bool(body.get("download_prompt_each_time"))
+    if "download_basename_prefix" in body:
+        cfg["download_basename_prefix"] = _sanitize_download_basename_prefix(
+            body.get("download_basename_prefix"),
+        )
+    if "developer_mode" in body:
+        cfg["developer_mode"] = bool(body.get("developer_mode"))
+    if "theme" in body:
+        cfg["theme"] = normalize_theme(body.get("theme"))
+    if "filter_visibility" in body:
+        merged = _merge_filter_visibility(cfg.get("filter_visibility"))
+        sub = body.get("filter_visibility")
+        if isinstance(sub, dict):
+            for k in list(merged.keys()):
+                if k in sub:
+                    merged[k] = bool(sub[k])
+        cfg["filter_visibility"] = merged
+    _save_config(Path(data_dir), cfg)
+    return get_gallery_preferences(data_dir=data_dir)
+
+
+def remove_root_from_config(path: _PathLike, *, data_dir: _PathLike) -> None:
+    """Remove ``path`` from ``gallery_config.json`` ``roots`` list (T33).
+
+    Caller must already have removed / unindexed the DB side.
+    """
+    posix = _posix(path)
+    cfg = _load_config(Path(data_dir))
+    roots = cfg.get("roots", [])
+    if not isinstance(roots, list):
+        roots = []
+    cfg["roots"] = [p for p in roots if _posix(str(p)) != posix]
+    _save_config(Path(data_dir), cfg)

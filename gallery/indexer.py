@@ -38,6 +38,7 @@ from PIL import Image, UnidentifiedImageError
 
 from . import db as _db
 from . import metadata as _metadata
+from . import paths as _paths
 from . import repo as _repo
 from . import vocab as _vocab
 
@@ -50,6 +51,9 @@ __all__ = [
     "delete_one",
     "is_cold_scanning",
     "schedule_cold_scan_all",
+    "is_derivative_path_excluded",
+    "maybe_rebuild_prompt_vocab_from_config",
+    "reconcile_folders_under_root",
 ]
 
 _PathLike = Union[str, Path]
@@ -57,6 +61,14 @@ _PathLike = Union[str, Path]
 # Image file extensions recognised by the indexer. Narrow on purpose:
 # adding RAW / video / etc. is a future task, not T07.
 _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+def is_derivative_path_excluded(abs_path: str, root_path: str) -> bool:
+    """Delegate to ``paths.is_derivative_path_excluded`` (T29)."""
+    return _paths.is_derivative_path_excluded(abs_path, root_path)
+
+
+def _prune_derivative_walk_dirs(dirnames: List[str]) -> None:
+    _paths.prune_derivative_walk_dirnames(dirnames)
 
 # inflight barrier (TASKS T07 UPDATED): dedupes concurrent requests
 # targeting the same physical file across cold_scan / index_one / the
@@ -220,6 +232,7 @@ def _build_upsert_op(
     width, height = _read_dims(abs_path)
     now = int(time.time())
     prompt_tokens = _vocab.normalize_prompt(meta.positive_prompt, extra_stopwords)
+    word_tokens = list(_vocab.split_positive_prompt_words(meta.positive_prompt))
     normalized_tags = _normalized_tag_list(meta.tags)
     return _repo.UpsertImageOp(
         path=posix_path,
@@ -251,6 +264,7 @@ def _build_upsert_op(
         tags_csv=_normalise_tags_csv(meta.tags),
         indexed_at=now,
         prompt_tokens=prompt_tokens,
+        word_tokens=word_tokens,
         normalized_tags=normalized_tags,
     )
 
@@ -263,10 +277,15 @@ def _iter_image_files(root_path: str) -> Iterable[str]:
     def _onerror(exc: OSError) -> None:
         logger.warning("walk error under %s: %s", root_path, exc)
 
-    for dirpath, _dirnames, filenames in os.walk(root_path, onerror=_onerror):
+    for dirpath, dirnames, filenames in os.walk(root_path, onerror=_onerror):
+        _prune_derivative_walk_dirs(dirnames)
         for name in filenames:
-            if _is_image(name):
-                yield os.path.join(dirpath, name)
+            if not _is_image(name):
+                continue
+            full = os.path.join(dirpath, name)
+            if is_derivative_path_excluded(full, root_path):
+                continue
+            yield full
 
 
 # Progress reporting batch size per TASKS T07 ("每 500 条触发一次进度统计").
@@ -358,6 +377,7 @@ def cold_scan(
         "cold_scan done (root=%s): walked=%d enqueued=%d skipped=%d errors=%d",
         root_path, walked, enqueued, skipped, errors,
     )
+    reconcile_folders_under_root(root, db_path=db_path, write_queue=write_queue)
     return {
         "walked": walked, "skipped": skipped,
         "enqueued": enqueued, "errors": errors,
@@ -377,6 +397,8 @@ def index_one(
     """
     abs_path = str(path)
     if _metadata.is_gallery_atomic_temp_basename(os.path.basename(abs_path)):
+        return None
+    if is_derivative_path_excluded(abs_path, str(root["path"])):
         return None
     key = _normalise_key(abs_path)
     if not _claim(key):
@@ -486,6 +508,7 @@ def delta_scan(
     deleted_ids = _reconcile_missing_disk_rows(
         root, db_path=db_path, write_queue=write_queue,
     )
+    reconcile_folders_under_root(root, db_path=db_path, write_queue=write_queue)
     return {
         "walked": walked,
         "changed": changed,
@@ -526,6 +549,15 @@ def _reconcile_missing_disk_rows(
                 continue
         except (OSError, TypeError, ValueError):
             continue
+        if is_derivative_path_excluded(p, str(root["path"])):
+            try:
+                iid = delete_one(p, db_path=db_path, write_queue=write_queue)
+            except Exception:
+                logger.exception("reconcile delete_one failed path=%r", p)
+                continue
+            if iid is not None:
+                deleted.append(int(iid))
+            continue
         if os.path.isfile(p):
             continue
         try:
@@ -539,6 +571,57 @@ def _reconcile_missing_disk_rows(
 
 
 # -- startup orchestration --------------------------------------------------
+
+def maybe_rebuild_prompt_vocab_from_config(
+    *, db_path: _PathLike, data_dir: _PathLike, write_queue,
+) -> None:
+    """T30: when ``vocab_version`` in ``gallery_config.json`` is below
+    ``vocab.PROMPT_VOCAB_PIPELINE_VERSION``, enqueue a full rebuild of
+    ``prompt_token`` / ``image_prompt_token`` from ``image.positive_prompt``,
+    then bump the config. No-op when already current.
+    """
+    from . import folders as _folders
+
+    dp = Path(data_dir)
+    cfg = _folders._load_config(dp)
+    cur_raw = cfg.get("vocab_version", 0)
+    try:
+        cur = int(cur_raw)
+    except (TypeError, ValueError):
+        cur = 0
+    target = int(_vocab.PROMPT_VOCAB_PIPELINE_VERSION)
+    if cur >= target:
+        return
+    extra_sw = _load_prompt_stopwords(db_path)
+    fut = write_queue.enqueue_write(
+        _repo.HIGH,
+        _repo.RebuildPromptVocabFullOp(extra_stopwords=extra_sw),
+    )
+    fut.result(timeout=None)
+    cfg2 = _folders._load_config(dp)
+    cfg2["vocab_version"] = target
+    _folders._save_config(dp, cfg2)
+
+
+def reconcile_folders_under_root(
+    root: Dict[str, Any], *, db_path: _PathLike, write_queue,
+) -> None:
+    """Enqueue ``ReconcileFoldersUnderRootOp`` (LOW) — sync ``folder`` rows with disk."""
+    try:
+        write_queue.enqueue_write(
+            _repo.LOW,
+            _repo.ReconcileFoldersUnderRootOp(
+                root_id=int(root["id"]),
+                root_path=str(root["path"]),
+                root_kind=str(root["kind"]),
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "reconcile_folders_under_root enqueue failed root_id=%s",
+            root.get("id"),
+        )
+
 
 def _load_roots(db_path: _PathLike) -> List[Dict[str, Any]]:
     conn = _db.connect_read(db_path)

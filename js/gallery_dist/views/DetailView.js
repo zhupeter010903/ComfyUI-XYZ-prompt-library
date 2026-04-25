@@ -3,8 +3,9 @@
 //
 // Contract per TASKS T14 / SPEC FR-16..19:
 //   * Left pane: original image served by backend-injected `raw_url`
-//     (SPEC §4 #39 — NEVER hand-crafted). Zoom controls: Fit / 1:1 /
-//     + / − plus pointer-drag pan; wheel-zoom is not in scope for T14.
+//     (SPEC §4 #39 — NEVER hand-crafted). Zoom: Fit / 1:1 / + / −,
+//     pointer-drag pan, and wheel on the canvas (WHEEL_ZOOM_STEP). Prev/Next
+//     also on ArrowLeft / ArrowRight when focus is not in an input.
 //   * Previous / Next buttons call GET /image/{id}/neighbors with the
 //     current FilterSpec + SortSpec so the traversal stays inside the
 //     same result set (SPEC FR-16 wording "within the current
@@ -39,16 +40,20 @@ import {
   onMounted, onBeforeUnmount, nextTick,
 } from 'vue';
 import * as api from '../api.js';
+import { executeImageDownload } from '../stores/downloadHelper.js';
 import { apiQueryObject, filterState } from '../stores/filters.js';
 import { BASE_URL } from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
 import { ConfirmModal } from '../components/ConfirmModal.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 import { vocabCacheClear } from '../stores/vocab.js';
+import { vocabAutocompleteMatch, developerMode } from '../stores/gallerySettings.js';
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 20;
 const ZOOM_STEP = 1.25;
+/** Slightly gentler than toolbar +/- so trackpad + mouse wheel feel usable. */
+const WHEEL_ZOOM_STEP = 1.12;
 
 function fmtBytesDv(n) {
   const x = Number(n) || 0;
@@ -86,7 +91,6 @@ export const DetailView = defineComponent({
     const tagInput = ref('');
     const gallerySaving = ref(false);
     const favSaving = ref(false);
-    const resyncing = ref(false);
     const delModal = ref(false);
     const delBusy = ref(false);
     const delErr = ref('');
@@ -95,6 +99,17 @@ export const DetailView = defineComponent({
 
     const copiedKey = ref(null);
     let copyTimer = null;
+
+    /** T37 — §11 V1.1-F12: "原文" (PNG/DB 存证) vs "归一化" (§8.8 词表管线). */
+    const posView = ref(/** @type {'raw' | 'norm'} */('raw'));
+
+    const nameEditing = ref(false);
+    const nameEditDraft = ref('');
+    const renameBusy = ref(false);
+    const renameErr = ref('');
+    /** @type {import('vue').Ref<{ id: number, path: string }[] | null>} */
+    const folderTreeFlat = ref(null);
+    const fnameInputRef = ref(/** @type {HTMLInputElement | null} */(null));
 
     function syncTagDraft() {
       const g = record.value && record.value.gallery;
@@ -174,20 +189,6 @@ export const DetailView = defineComponent({
         syncTagDraft();
       } finally {
         favSaving.value = false;
-      }
-    }
-
-    async function doResync() {
-      if (resyncing.value || !record.value) return;
-      resyncing.value = true;
-      try {
-        const out = await api.post(`/image/${props.id}/resync`, {});
-        record.value = out;
-        syncTagDraft();
-      } catch (e) {
-        /* error stays in record; user can retry */
-      } finally {
-        resyncing.value = false;
       }
     }
 
@@ -278,6 +279,150 @@ export const DetailView = defineComponent({
     function zoomOut() {
       scale.value = Math.max(MIN_SCALE, scale.value / ZOOM_STEP);
     }
+    function zoomInWheel() {
+      scale.value = Math.min(MAX_SCALE, scale.value * WHEEL_ZOOM_STEP);
+    }
+    function zoomOutWheel() {
+      scale.value = Math.max(MIN_SCALE, scale.value / WHEEL_ZOOM_STEP);
+    }
+
+    /**
+     * Skip image prev/next when user types in a field; tag Autocomplete
+     * hosts an <input> inside .dv-tagac.
+     * @param {EventTarget | null} t
+     * @returns {boolean}
+     */
+    function isEditableKeyTarget(t) {
+      if (!t || t.nodeType !== 1) return false;
+      const el = /** @type {Element} */ (t);
+      if (el.closest && el.closest('.dv-tagac')) return true;
+      if (el.classList && el.classList.contains('dv-fname-input')) return true;
+      const name = el.tagName;
+      if (name === 'INPUT' || name === 'TEXTAREA' || name === 'SELECT') return true;
+      return /** @type {HTMLElement} */ (el).isContentEditable === true;
+    }
+
+    function _normPathKey(/** @type {string} */ p) {
+      return String(p).replace(/\\/g, '/');
+    }
+    function _dirnameFilePath(/** @type {string} */ p) {
+      const s = _normPathKey(p);
+      const i = s.lastIndexOf('/');
+      return i < 0 ? s : s.slice(0, i);
+    }
+    function _walkFolderNodes(/** @type {unknown} */ nodes, /** @type {{ id: number, path: string }[]} */ out) {
+      if (!Array.isArray(nodes)) return;
+      for (const n of nodes) {
+        if (n && typeof n === 'object' && n.id != null && n.path != null) {
+          out.push({ id: Number(n.id), path: String(n.path) });
+        }
+        if (n && typeof n === 'object' && Array.isArray(n.children)) {
+          _walkFolderNodes(n.children, out);
+        }
+      }
+    }
+    async function loadFolderTree() {
+      const data = await api.get('/folders');
+      const out = /** @type {{ id: number, path: string }[]} */ ([]);
+      _walkFolderNodes(data, out);
+      folderTreeFlat.value = out;
+    }
+    function findParentFolderId(/** @type {string} */ filePath) {
+      const want = _normPathKey(_dirnameFilePath(filePath));
+      const list = folderTreeFlat.value;
+      if (!list || !list.length) return null;
+      for (const f of list) {
+        if (_normPathKey(f.path).toLowerCase() === want.toLowerCase()) return f.id;
+      }
+      return null;
+    }
+    function closeRenameErr() { renameErr.value = ''; }
+    async function startRename() {
+      if (!record.value || renameBusy.value) return;
+      renameErr.value = '';
+      try {
+        if (!folderTreeFlat.value) await loadFolderTree();
+      } catch {
+        renameErr.value = '无法加载目录列表';
+        return;
+      }
+      nameEditDraft.value = String(record.value.filename || '');
+      nameEditing.value = true;
+      nextTick(() => { fnameInputRef.value && fnameInputRef.value.focus(); });
+    }
+    function cancelRename() {
+      if (renameBusy.value) return;
+      nameEditing.value = false;
+      nameEditDraft.value = String(record.value && record.value.filename ? record.value.filename : '');
+    }
+    async function applyRename() {
+      if (!nameEditing.value || !record.value) return;
+      const cur = String(record.value.filename || '');
+      const next = String(nameEditDraft.value || '').trim();
+      if (!next) { cancelRename(); return; }
+      if (next.includes('/') || next.includes('\\')) {
+        renameErr.value = '文件名不能包含路径分隔符';
+        nameEditing.value = false;
+        nameEditDraft.value = cur;
+        return;
+      }
+      if (next === cur) {
+        nameEditing.value = false;
+        return;
+      }
+      const tid = findParentFolderId(String(record.value.path || ''));
+      if (tid == null) {
+        renameErr.value = '无法解析图片所在目录，请重试或刷新目录树';
+        nameEditing.value = false;
+        nameEditDraft.value = cur;
+        return;
+      }
+      renameBusy.value = true;
+      try {
+        const out = await api.post(`/image/${props.id}/move`, {
+          target_folder_id: tid,
+          rename: next,
+        });
+        record.value = out;
+        nameEditing.value = false;
+      } catch (e) {
+        let msg = (e && e.message) ? String(e.message) : String(e);
+        const det = e && e.details;
+        if (det && typeof det.suggested_name === 'string' && det.suggested_name) {
+          msg += ' — 建议: ' + det.suggested_name;
+        }
+        renameErr.value = msg;
+        nameEditing.value = false;
+        nameEditDraft.value = cur;
+      } finally {
+        renameBusy.value = false;
+      }
+    }
+
+    function onCanvasWheel(/** @type {WheelEvent} */ e) {
+      if (e.deltaY < 0) zoomInWheel();
+      else if (e.deltaY > 0) zoomOutWheel();
+    }
+
+    function onDetailKeydown(/** @type {KeyboardEvent} */ e) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        if (nameEditing.value) {
+          e.preventDefault();
+          return;
+        }
+      }
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (delModal.value) return;
+      if (isEditableKeyTarget(e.target)) return;
+      if (neighborsLoading.value || !record.value) return;
+      e.preventDefault();
+      if (e.key === 'ArrowLeft') {
+        void gotoPrev();
+      } else {
+        void gotoNext();
+      }
+    }
 
     function onImgLoad(ev) {
       const img = ev.target;
@@ -350,6 +495,7 @@ export const DetailView = defineComponent({
     }
 
     onMounted(() => {
+      window.addEventListener('keydown', onDetailKeydown);
       fetchRecord(props.id);
       fetchNeighbors(props.id);
       nextTick(() => {
@@ -397,6 +543,7 @@ export const DetailView = defineComponent({
     });
 
     onBeforeUnmount(() => {
+      window.removeEventListener('keydown', onDetailKeydown);
       if (unsubEvent) { unsubEvent(); unsubEvent = null; }
       if (unsubRecon) { unsubRecon(); unsubRecon = null; }
       if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
@@ -404,6 +551,10 @@ export const DetailView = defineComponent({
     });
 
     watch(() => props.id, (newId) => {
+      posView.value = 'raw';
+      nameEditing.value = false;
+      renameErr.value = '';
+      folderTreeFlat.value = null;
       fetchRecord(newId);
       fetchNeighbors(newId);
       // Reset zoom between images so the next image starts fit-to-
@@ -414,6 +565,18 @@ export const DetailView = defineComponent({
     });
 
     const meta = computed(() => (record.value && record.value.metadata) || {});
+    const displayPositive = computed(() => {
+      const m = meta.value;
+      if (!m || typeof m !== 'object') return null;
+      if (posView.value === 'norm') {
+        const n = m.positive_prompt_normalized;
+        if (n != null && String(n).length) return String(n);
+        return null;
+      }
+      const p = m.positive_prompt;
+      if (p != null && String(p).length) return String(p);
+      return null;
+    });
     const gallery = computed(() => (record.value && record.value.gallery) || {});
     const size = computed(() => (record.value && record.value.size) || {});
     const folder = computed(() => (record.value && record.value.folder) || {});
@@ -426,8 +589,7 @@ export const DetailView = defineComponent({
       if (s === 'failed') return 'failed';
       return null;
     });
-    const rawDownloadUrl = computed(() =>
-      record.value ? `${BASE_URL}/raw/${record.value.id}/download` : '#');
+    const dlImageBusy = ref(false);
     const workflowUrl = computed(() =>
       record.value ? `${BASE_URL}/image/${record.value.id}/workflow.json` : '#');
     const scalePct = computed(() => Math.round(scale.value * 100));
@@ -457,6 +619,18 @@ export const DetailView = defineComponent({
       if (!delBusy.value) delModal.value = false;
     }
 
+    async function onDownloadImage() {
+      if (!record.value) return;
+      dlImageBusy.value = true;
+      try {
+        await executeImageDownload(record.value.id);
+      } catch {
+        /* ignore */
+      } finally {
+        dlImageBusy.value = false;
+      }
+    }
+
     async function onDeleteConfirmed() {
       if (!record.value) return;
       delErr.value = '';
@@ -484,21 +658,27 @@ export const DetailView = defineComponent({
 
     return {
       loading, error, record, meta, gallery, size, folder,
+      posView, displayPositive,
       prevId, nextId, neighborsLoading,
       scale, tx, ty, scalePct,
       canvasRef, imgStyle, copiedKey,
-      hasWorkflow, rawDownloadUrl, workflowUrl,
+      hasWorkflow, workflowUrl, dlImageBusy, onDownloadImage,
+      vocabAutocompleteMatch,
+      developerMode,
       syncStatusBadge,
       tagDraft, tagInput, onTagInput, commitNewTag, removeTag, applyTags,
-      gallerySaving, toggleFavorite, doResync, favSaving, resyncing,
+      gallerySaving, toggleFavorite, favSaving,
       onImgLoad,
       onPointerDown, onPointerMove, onPointerUp,
+      onCanvasWheel,
       fit, actualSize, zoomIn, zoomOut,
       gotoPrev, gotoNext, copy,
       onWorkflowClick,
       delModal, delBusy, delErr, openDelModal, closeDelModal, onDeleteConfirmed,
       fmtBytesDv,
       deleteModalLines,
+      nameEditing, nameEditDraft, renameBusy, renameErr, fnameInputRef,
+      startRename, cancelRename, applyRename, closeRenameErr,
     };
   },
   template: `
@@ -512,7 +692,7 @@ export const DetailView = defineComponent({
                   :class="'tc-sync-'+syncStatusBadge"
                   :title="syncStatusBadge==='pending' ? 'Metadata sync: pending' : 'Metadata sync: failed'"
                   aria-label="metadata sync" />
-            #{{ record.id }} &mdash; {{ record.filename }}
+            <template v-if="developerMode">#{{ record.id }} &mdash; </template>{{ record.filename }}
           </span>
           <span v-else-if="loading" class="muted">Loading…</span>
           <span v-else-if="error" class="error">
@@ -524,12 +704,12 @@ export const DetailView = defineComponent({
                   class="dv-nav-btn"
                   @click="gotoPrev"
                   :disabled="neighborsLoading || !record"
-                  title="Previous (wraps)">&larr; Previous</button>
+                  title="Previous (wraps) — ←">&larr; Previous</button>
           <button type="button"
                   class="dv-nav-btn"
                   @click="gotoNext"
                   :disabled="neighborsLoading || !record"
-                  title="Next (wraps)">Next &rarr;</button>
+                  title="Next (wraps) — →">Next &rarr;</button>
         </nav>
       </header>
 
@@ -544,7 +724,8 @@ export const DetailView = defineComponent({
                @pointerdown="onPointerDown"
                @pointermove="onPointerMove"
                @pointerup="onPointerUp"
-               @pointercancel="onPointerUp">
+               @pointercancel="onPointerUp"
+               @wheel.prevent="onCanvasWheel">
             <img v-if="record && record.raw_url"
                  class="dv-img"
                  :src="record.raw_url"
@@ -564,140 +745,179 @@ export const DetailView = defineComponent({
         </div>
 
         <aside class="dv-right">
-          <h3 class="dv-sec">Metadata</h3>
-          <dl class="dv-meta">
-            <template v-if="record">
-              <dt>Size</dt>
-              <dd>
-                <template v-if="size.width && size.height">
-                  {{ size.width }} &times; {{ size.height }}
-                </template>
-                <span v-else class="muted">—</span>
-                <span v-if="size.bytes" class="muted dv-bytes">
-                  ({{ size.bytes }} bytes)
-                </span>
-              </dd>
+          <template v-if="record">
+            <section class="dv-sec-block" aria-label="image data">
+              <h3 class="dv-sec">Image data</h3>
+              <dl class="dv-meta">
+                <dt>File name</dt>
+                <dd class="dv-fname-wrap">
+                  <template v-if="!nameEditing">
+                    <code class="dv-fname-read"
+                          :title="record.filename"
+                          @dblclick="startRename">{{ record.filename }}</code>
+                    <button type="button"
+                            class="dv-fname-pencil"
+                            :disabled="renameBusy"
+                            title="Rename (or double-click name)"
+                            aria-label="Rename file"
+                            @click="startRename">✎</button>
+                  </template>
+                  <div v-else class="dv-fname-edit" role="group" aria-label="Rename file">
+                    <input ref="fnameInputRef"
+                           class="dv-fname-input"
+                           v-model="nameEditDraft"
+                           type="text"
+                           :disabled="renameBusy"
+                           autocomplete="off"
+                           @keydown.enter.prevent="applyRename"
+                           @keydown.esc.prevent="cancelRename" />
+                    <button type="button" class="dv-fname-ok" :disabled="renameBusy" title="Save" @click="applyRename">✓</button>
+                    <button type="button" class="dv-fname-x" :disabled="renameBusy" title="Cancel" @click="cancelRename">✕</button>
+                  </div>
+                </dd>
+                <dt>Folder</dt>
+                <dd>
+                  <code>{{ folder.display_name || '—' }}</code>
+                  <span v-if="folder.kind" class="muted"> ({{ folder.kind }})</span>
+                </dd>
+                <dt>Size</dt>
+                <dd>
+                  <template v-if="size.width && size.height">
+                    {{ size.width }} &times; {{ size.height }}
+                  </template>
+                  <span v-else class="muted">—</span>
+                  <span v-if="size.bytes" class="muted dv-bytes"> ({{ fmtBytesDv(size.bytes) }})</span>
+                </dd>
+                <dt>Created</dt>
+                <dd>{{ record.created_at || '—' }}</dd>
+              </dl>
+            </section>
 
-              <dt>Created</dt>
-              <dd>{{ record.created_at || '—' }}</dd>
-
-              <dt>Folder</dt>
-              <dd>
-                <code>{{ folder.display_name || '—' }}</code>
-                <span v-if="folder.kind" class="muted"> ({{ folder.kind }})</span>
-              </dd>
-
-              <dt>Model</dt>
-              <dd><code v-if="meta.model">{{ meta.model }}</code><span v-else class="muted">—</span></dd>
-
-              <dt>
-                Seed
-                <button type="button" class="dv-copy"
-                        :disabled="meta.seed == null"
-                        @click="copy('seed', meta.seed)">
-                  {{ copiedKey === 'seed' ? 'Copied!' : 'Copy' }}
-                </button>
-              </dt>
-              <dd><code v-if="meta.seed != null">{{ meta.seed }}</code><span v-else class="muted">—</span></dd>
-
-              <dt>CFG</dt>
-              <dd><code v-if="meta.cfg != null">{{ meta.cfg }}</code><span v-else class="muted">—</span></dd>
-
-              <dt>Sampler</dt>
-              <dd><code v-if="meta.sampler">{{ meta.sampler }}</code><span v-else class="muted">—</span></dd>
-
-              <dt>Scheduler</dt>
-              <dd><code v-if="meta.scheduler">{{ meta.scheduler }}</code><span v-else class="muted">—</span></dd>
-
-              <dt>
-                Positive prompt
-                <button type="button" class="dv-copy"
-                        :disabled="!meta.positive_prompt"
-                        @click="copy('positive', meta.positive_prompt)">
-                  {{ copiedKey === 'positive' ? 'Copied!' : 'Copy' }}
-                </button>
-              </dt>
-              <dd>
-                <pre v-if="meta.positive_prompt" class="dv-prompt">{{ meta.positive_prompt }}</pre>
-                <span v-else class="muted">—</span>
-              </dd>
-
-              <dt>
-                Negative prompt
-                <button type="button" class="dv-copy"
-                        :disabled="!meta.negative_prompt"
-                        @click="copy('negative', meta.negative_prompt)">
-                  {{ copiedKey === 'negative' ? 'Copied!' : 'Copy' }}
-                </button>
-              </dt>
-              <dd>
-                <pre v-if="meta.negative_prompt" class="dv-prompt">{{ meta.negative_prompt }}</pre>
-                <span v-else class="muted">—</span>
-              </dd>
-
-              <dt>Gallery</dt>
-              <dd>
-                <div class="dv-favrow">
-                  <span class="muted">Favorite:</span>
+            <section class="dv-sec-block" aria-label="gallery data">
+              <h3 class="dv-sec">Gallery data</h3>
+              <dl class="dv-meta">
+                <dt>Favorite</dt>
+                <dd>
                   <button type="button"
                           class="dv-fav"
                           :class="{ active: gallery.favorite }"
                           :aria-pressed="gallery.favorite ? 'true' : 'false'"
                           :disabled="favSaving"
                           :title="gallery.favorite ? 'Unfavorite' : 'Favorite'"
-                          @click="toggleFavorite">★</button>
-                </div>
-                <p v-if="syncStatusBadge==='failed' && record" class="dv-resync">
-                  <button type="button" class="dv-resync-btn" :disabled="resyncing" @click="doResync">
-                    {{ resyncing ? 'Retrying…' : 'Retry metadata sync' }}
+                          @click="toggleFavorite">
+                    <span class="dv-fav-icon" aria-hidden="true">{{ gallery.favorite ? '♥' : '♡' }}</span>
                   </button>
-                </p>
-                <p class="muted">Tags (T21 / T22)</p>
-                <ul class="dv-tags" v-if="tagDraft && tagDraft.length">
-                  <li v-for="(t, i) in tagDraft" :key="i" class="dv-tag">
-                    <code>{{ t }}</code>
-                    <button type="button" class="dv-tag-x" @click="removeTag(i)" :aria-label="'remove '+t">×</button>
-                  </li>
-                </ul>
-                <p v-else class="dv-tags-empty muted">No tags in draft (add below)</p>
-                <Autocomplete class="dv-tagac"
-                              fetch-kind="tags"
-                              placeholder="Type a tag, pick from list, Enter"
-                              :model-value="tagInput"
-                              @update:model-value="onTagInput"
-                              @commit="commitNewTag" />
-                <p class="dv-applyp">
-                  <button type="button" class="dv-apply" :disabled="gallerySaving" @click="applyTags">
+                </dd>
+                <dt>Tags</dt>
+                <dd class="dv-tags-oneline">
+                  <ul v-if="tagDraft && tagDraft.length" class="dv-tags dv-tags--inline">
+                    <li v-for="(t, i) in tagDraft" :key="i" class="dv-tag">
+                      <code>{{ t }}</code>
+                      <button type="button" class="dv-tag-x" @click="removeTag(i)" :aria-label="'remove '+t">×</button>
+                    </li>
+                  </ul>
+                  <span v-else class="dv-tags-empty muted" role="status">(none)</span>
+                  <Autocomplete class="dv-tagac dv-tagac--inline"
+                                fetch-kind="tags"
+                                :vocab-match-mode="vocabAutocompleteMatch"
+                                placeholder="Add tag, Enter"
+                                :model-value="tagInput"
+                                @update:model-value="onTagInput"
+                                @commit="commitNewTag" />
+                  <button type="button"
+                          class="dv-apply"
+                          :disabled="gallerySaving"
+                          @click="applyTags">
                     {{ gallerySaving ? 'Saving…' : 'Apply tags' }}
                   </button>
-                </p>
-              </dd>
-            </template>
-            <template v-else-if="loading">
-              <dt class="muted">Loading…</dt><dd>&nbsp;</dd>
-            </template>
-          </dl>
+                </dd>
+              </dl>
+            </section>
 
-          <div class="dv-actions">
-            <a class="dv-btn"
-               :href="rawDownloadUrl"
-               :aria-disabled="!record"
-               :class="{ 'dv-btn-disabled': !record }"
-               download>Download image</a>
-            <a class="dv-btn"
-               :href="workflowUrl"
-               :aria-disabled="!hasWorkflow"
-               :class="{ 'dv-btn-disabled': !hasWorkflow }"
-               :tabindex="hasWorkflow ? 0 : -1"
-               @click="onWorkflowClick"
-               download>Download workflow</a>
-            <button type="button"
-                    class="dv-btn dv-btn-danger"
-                    :disabled="delBusy || !record"
-                    title="Permanently delete this image"
-                    @click="openDelModal">Delete</button>
-            <a class="dv-btn" href="#/">Back</a>
-          </div>
+            <section class="dv-sec-block" aria-label="comfyui data">
+              <h3 class="dv-sec">ComfyUI data</h3>
+              <dl class="dv-meta">
+                <dt>Model</dt>
+                <dd><code v-if="meta.model">{{ meta.model }}</code><span v-else class="muted">—</span></dd>
+                <dt>
+                  Seed
+                  <button type="button" class="dv-copy"
+                          :disabled="meta.seed == null"
+                          @click="copy('seed', meta.seed)">
+                    {{ copiedKey === 'seed' ? 'Copied!' : 'Copy' }}
+                  </button>
+                </dt>
+                <dd><code v-if="meta.seed != null">{{ meta.seed }}</code><span v-else class="muted">—</span></dd>
+                <dt>CFG</dt>
+                <dd><code v-if="meta.cfg != null">{{ meta.cfg }}</code><span v-else class="muted">—</span></dd>
+                <dt>Sampler</dt>
+                <dd><code v-if="meta.sampler">{{ meta.sampler }}</code><span v-else class="muted">—</span></dd>
+                <dt>Scheduler</dt>
+                <dd><code v-if="meta.scheduler">{{ meta.scheduler }}</code><span v-else class="muted">—</span></dd>
+                <dt>
+                  Positive prompt
+                  <span class="dv-prompt-mode" role="group" aria-label="positive prompt view">
+                    <button type="button"
+                            class="dv-prompt-mode-btn"
+                            :class="{ active: posView === 'raw' }"
+                            :aria-pressed="posView === 'raw' ? 'true' : 'false'"
+                            @click="posView = 'raw'">原文</button>
+                    <button type="button"
+                            class="dv-prompt-mode-btn"
+                            :class="{ active: posView === 'norm' }"
+                            :aria-pressed="posView === 'norm' ? 'true' : 'false'"
+                            @click="posView = 'norm'">归一化</button>
+                  </span>
+                  <button type="button" class="dv-copy"
+                          :disabled="!displayPositive"
+                          @click="copy('positive', displayPositive)">
+                    {{ copiedKey === 'positive' ? 'Copied!' : 'Copy' }}
+                  </button>
+                </dt>
+                <dd>
+                  <pre v-if="displayPositive" class="dv-prompt">{{ displayPositive }}</pre>
+                  <span v-else class="muted">—</span>
+                </dd>
+                <dt>
+                  Negative prompt
+                  <button type="button" class="dv-copy"
+                          :disabled="!meta.negative_prompt"
+                          @click="copy('negative', meta.negative_prompt)">
+                    {{ copiedKey === 'negative' ? 'Copied!' : 'Copy' }}
+                  </button>
+                </dt>
+                <dd>
+                  <pre v-if="meta.negative_prompt" class="dv-prompt">{{ meta.negative_prompt }}</pre>
+                  <span v-else class="muted">—</span>
+                </dd>
+              </dl>
+            </section>
+
+            <section class="dv-sec-block" aria-label="operations">
+              <h3 class="dv-sec">Operations</h3>
+              <div class="dv-actions">
+                <button type="button"
+                        class="dv-btn"
+                        :disabled="dlImageBusy || !record"
+                        @click="onDownloadImage">
+                  {{ dlImageBusy ? 'Preparing…' : 'Download image' }}
+                </button>
+                <a class="dv-btn"
+                   :href="workflowUrl"
+                   :aria-disabled="!hasWorkflow"
+                   :class="{ 'dv-btn-disabled': !hasWorkflow }"
+                   :tabindex="hasWorkflow ? 0 : -1"
+                   @click="onWorkflowClick"
+                   download>Download workflow</a>
+                <button type="button"
+                        class="dv-btn dv-btn-danger"
+                        :disabled="delBusy || !record"
+                        title="Permanently delete this image"
+                        @click="openDelModal">Delete</button>
+              </div>
+            </section>
+          </template>
+          <div v-else-if="loading" class="dv-meta muted">Loading…</div>
         </aside>
       </div>
       <ConfirmModal
@@ -711,6 +931,20 @@ export const DetailView = defineComponent({
         @cancel="closeDelModal"
         @confirm="onDeleteConfirmed"
       />
+      <div v-if="renameErr" class="cm-overlay" @click.self="closeRenameErr">
+        <div class="cm-panel" role="alertdialog">
+          <header class="cm-head">
+            <h2 class="cm-title">Rename</h2>
+            <button type="button" class="cm-x" @click="closeRenameErr">×</button>
+          </header>
+          <div class="cm-body">
+            <p class="cm-line">{{ renameErr }}</p>
+          </div>
+          <footer class="cm-foot cm-foot--single">
+            <button type="button" class="cm-btn" @click="closeRenameErr">OK</button>
+          </footer>
+        </div>
+      </div>
       <p v-if="delErr" class="error dv-del-err">{{ delErr }}</p>
     </section>
   `,

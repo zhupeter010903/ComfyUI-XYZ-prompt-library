@@ -85,6 +85,12 @@ def _is_image_name(name: str) -> bool:
     return ext in _IMAGE_EXTS
 
 
+def _is_derivative_excluded_path(path: str, root_path: str) -> bool:
+    from . import indexer as _indexer
+
+    return _indexer.is_derivative_path_excluded(path, root_path)
+
+
 # ---- SPEC 8.2 merge (created+modified → upsert; created+delete → drop) ----
 
 
@@ -170,6 +176,7 @@ class Coalescer:
         self._tick = threading.Thread(
             target=self._tick_loop, name="xyz-gallery-coalescer", daemon=True,
         )
+        self._folder_mono: Optional[float] = None
 
     def start(self) -> None:
         self._tick.start()
@@ -203,6 +210,10 @@ class Coalescer:
             self._delta.request()
             logger.info("coalescer overflow → delta_scan (root_id=%s)", self._root.get("id"))
 
+    def mark_folder_reconcile(self) -> None:
+        with self._lock:
+            self._folder_mono = time.monotonic()
+
     def _tick_loop(self) -> None:
         from . import indexer as _indexer
         from . import service as _service
@@ -232,12 +243,35 @@ class Coalescer:
                     else:
                         if not _is_image_name(os.path.basename(pend.path)):
                             continue
+                        if _is_derivative_excluded_path(
+                            pend.path, str(self._root["path"]),
+                        ):
+                            continue
                         iid = _indexer.index_one(
                             pend.path, root=self._root, db_path=self._db_path,
                             write_queue=self._write_queue,
                         )
                         if iid is not None:
                             _service.broadcast_image_upserted(int(iid))
+
+            with self._lock:
+                fm = self._folder_mono
+                if fm is not None and now - fm >= self.DEBOUNCE_S:
+                    self._folder_mono = None
+                    do_folder = True
+                else:
+                    do_folder = False
+            if do_folder:
+                try:
+                    _indexer.reconcile_folders_under_root(
+                        self._root,
+                        db_path=self._db_path,
+                        write_queue=self._write_queue,
+                    )
+                except Exception:
+                    logger.exception(
+                        "folder reconcile failed root_id=%s", self._root.get("id"),
+                    )
 
 _OBS: List[Any] = []
 _CLS: List[Coalescer] = []
@@ -355,27 +389,45 @@ def _make_handler(coalescer: Coalescer, root_path: str) -> Any:
     c = coalescer
     r = root_path
 
+    def _dir_reconcile_if_tracked(dir_path: str) -> None:
+        if not _in_root(dir_path, r):
+            return
+        probe = os.path.join(dir_path, ".__probe__.png")
+        if _is_derivative_excluded_path(probe, r):
+            return
+        c.mark_folder_reconcile()
+
     class _H(FileSystemEventHandler):
         def on_moved(
             _self, event,  # noqa: N802
         ) -> None:  # type: ignore[no-untyped-def]
             if event.is_directory:
+                src, dst = str(event.src_path or ""), str(event.dest_path or "")
+                if src:
+                    _dir_reconcile_if_tracked(src)
+                if dst:
+                    _dir_reconcile_if_tracked(dst)
                 return
             src, dst = str(event.src_path or ""), str(event.dest_path or "")
             if src and _in_root(src, r):
                 c.add(_as_key(src), src, "d")
-            if dst and _in_root(dst, r) and _is_image_name(
-                os.path.basename(dst),
-            ):
+            if dst and _in_root(dst, r) and not _is_derivative_excluded_path(
+                dst, r,
+            ) and _is_image_name(os.path.basename(dst)):
                 c.add(_as_key(dst), dst, "u")
 
         def on_created(
             _self, event,  # noqa: N802
         ) -> None:  # type: ignore[no-untyped-def]
-            if not isinstance(event, FileCreatedEvent) or event.is_directory:
+            if not isinstance(event, FileCreatedEvent):
+                return
+            if event.is_directory:
+                _dir_reconcile_if_tracked(str(event.src_path))
                 return
             p = str(event.src_path)
-            if not _in_root(p, r) or not _is_image_name(os.path.basename(p)):
+            if not _in_root(p, r) or _is_derivative_excluded_path(p, r):
+                return
+            if not _is_image_name(os.path.basename(p)):
                 return
             c.add(_as_key(p), p, "u")
 
@@ -385,17 +437,22 @@ def _make_handler(coalescer: Coalescer, root_path: str) -> Any:
             if not isinstance(event, FileModifiedEvent) or event.is_directory:
                 return
             p = str(event.src_path)
-            if not _in_root(p, r) or not _is_image_name(os.path.basename(p)):
+            if not _in_root(p, r) or _is_derivative_excluded_path(p, r):
+                return
+            if not _is_image_name(os.path.basename(p)):
                 return
             c.add(_as_key(p), p, "u")
 
         def on_deleted(
             _self, event,  # noqa: N802
         ) -> None:  # type: ignore[no-untyped-def]
-            if not isinstance(event, FileDeletedEvent) or event.is_directory:
+            if not isinstance(event, FileDeletedEvent):
                 return
             p = str(event.src_path)
             if not _in_root(p, r):
+                return
+            if event.is_directory:
+                _dir_reconcile_if_tracked(p)
                 return
             c.add(_as_key(p), p, "d")
 

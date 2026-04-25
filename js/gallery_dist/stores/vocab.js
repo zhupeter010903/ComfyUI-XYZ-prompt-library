@@ -5,12 +5,13 @@ const MAX_KEYS = 64;
 const cache = new Map();
 
 /**
- * @param {'tags'|'prompts'} kind
+ * @param {'tags'|'prompts'|'words'} kind
  * @param {string} prefix
+ * @param {'prefix'|'contains'} [matchMode]
  * @returns {Array<{name: string, usage_count: number}>|null}
  */
-export function vocabCacheGet(kind, prefix) {
-  const key = `${kind}|${prefix}`;
+export function vocabCacheGet(kind, prefix, matchMode = 'prefix') {
+  const key = `${kind}|${matchMode}|${prefix}`;
   const hit = cache.get(key);
   if (!hit) return null;
   cache.delete(key);
@@ -19,12 +20,13 @@ export function vocabCacheGet(kind, prefix) {
 }
 
 /**
- * @param {'tags'|'prompts'} kind
+ * @param {'tags'|'prompts'|'words'} kind
  * @param {string} prefix
  * @param {Array<{name: string, usage_count: number}>} results
+ * @param {'prefix'|'contains'} [matchMode]
  */
-export function vocabCacheSet(kind, prefix, results) {
-  const key = `${kind}|${prefix}`;
+export function vocabCacheSet(kind, prefix, results, matchMode = 'prefix') {
+  const key = `${kind}|${matchMode}|${prefix}`;
   if (cache.has(key)) cache.delete(key);
   cache.set(key, { results });
   while (cache.size > MAX_KEYS) {

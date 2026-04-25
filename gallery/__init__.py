@@ -91,12 +91,17 @@ def setup(app=None) -> None:
             data_dir=DATA_DIR,
             write_queue=_write_queue,
         )
+        from . import indexer as _indexer
+        _indexer.maybe_rebuild_prompt_vocab_from_config(
+            db_path=DB_PATH,
+            data_dir=DATA_DIR,
+            write_queue=_write_queue,
+        )
         # T07: kick off the first-run full index of every registered root
         # in a daemon thread. Must run AFTER ensure_default_roots so the
         # root rows exist; scan itself is non-blocking — NFR-1 budget
         # (PROJECT_STATE §5 "启动被 gallery 阻塞 ≤ 50 ms") only counts
         # the thread-start cost, not the walk.
-        from . import indexer as _indexer
         _indexer.schedule_cold_scan_all(
             db_path=DB_PATH,
             write_queue=_write_queue,

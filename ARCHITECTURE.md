@@ -11,6 +11,8 @@
 > 4. **Watcher 心跳与补偿扫描（Watchdog Reconciliation）** — 30 s 周期的 `delta_scan` 兜底丢失的文件系统事件。
 > 5. **性能强化** — 缩略图 LIFO 视口优先、FTS5 分词器显式配置、indexer 元数据解析进程池化。
 
+> **v1.1 文档分层（增量）**：本文 **MVP-L4** 及以下旧述保留；**Pre-L4 stabilization（v1.1）** 以本节新增小节与 `PROJECT_SPEC §11` 为准。在 v1.1 索引/词表/缩略磁盘布局未收敛前，**推迟**启动 L4 任务（`TASKS.md` T26–T28），理由见 `PROJECT_STATE.md`。
+
 ---
 
 ## 1. 项目目录结构
@@ -95,13 +97,13 @@ ComfyUI-XYZNodes/
 | `__init__.py` | 装配入口：确保 DB 文件存在、跑迁移、启动后台线程（含 WriteQueue 写入者、metadata_sync Worker、watcher 心跳）、注册路由。幂等。 | 不阻塞 ComfyUI 主事件循环（NFR-1）。 |
 | `routes.py` | aiohttp 处理器，**只做 I/O**：解析请求、校验形状、调用 `service`、序列化响应、设置缓存头。无业务逻辑。 | 任何 CPU/磁盘操作 > 5 ms 必须 `run_in_executor`（C-2）。 |
 | `service.py` | 用例编排层。把"列出图片"、"批量移动"等业务流程拆成对 `repo` / `indexer` / `thumbs` / `ws_hub` / `paths` / `metadata_sync` 的调用序列。事务边界与**写入优先级**归它决定。 | 所有跨模块副作用按"DB → enqueue PNG → 广播"的顺序保序。 |
-| `repo.py` | 唯一与 SQLite 交互的入口。**内嵌 `WriteQueue`（优先级队列）+ 单一写入者线程**；对外暴露同步读 API 与异步写入 API（`enqueue_write(priority, op)` 返回 `Future`）。拥有连接池、预编译语句、游标分页、tag-AND / prompt-AND 查询构造器、Selection 解析。 | 写并发 = 1（C-1 强化）；读并发不受影响（WAL）。 |
+| `repo.py` | 唯一与 SQLite 交互的入口。**内嵌 `WriteQueue`（优先级队列）+ 单一写入者线程**；对外暴露同步读 API 与异步写入 API（`enqueue_write(priority, op)` 返回 `Future`）。拥有连接池、预编译语句、游标分页、tag-AND / prompt-AND 查询构造器、Selection 解析。**含 `ReconcileFoldersUnderRootOp`**：按注册根 walk 磁盘，补 INSERT 缺失子目录行、DELETE 已不存在路径的行（deepest-first），成功变更后 `ws_hub.broadcast(folder.changed, {root_id})`。 | 写并发 = 1（C-1 强化）；读并发不受影响（WAL）。 |
 | `db.py` | Schema DDL、前向兼容的版本化迁移、FTS5 虚拟表及其触发器、WAL / NORMAL / MMAP 等 PRAGMA。**显式声明 FTS5 分词器**（`unicode61` + `tokenchars` 配置，§4.7.2）。 | 迁移只前进不后退（C-4）。 |
-| `indexer.py` | 三个入口：冷启动全量扫描、单根 delta-scan、单事件 upsert。对每个文件走 `(size, mtime_ns)` 指纹短路。**元数据解析（CPU 密集）走 ProcessPool**；解析结果回流到主线程后**统一通过 `repo.WriteQueue` 入队**。 | 幂等（C-3）；解析并行，写入串行。 |
+| `indexer.py` | 三个入口：冷启动全量扫描、单根 delta-scan、单事件 upsert。对每个文件走 `(size, mtime_ns)` 指纹短路。**元数据解析（CPU 密集）走 ProcessPool**；解析结果回流到主线程后**统一通过 `repo.WriteQueue` 入队**。每根 `cold_scan` / `delta_scan` 末尾调用 **`reconcile_folders_under_root`**（入队 `ReconcileFoldersUnderRootOp`，LOW）。 | 幂等（C-3）；解析并行，写入串行。 |
 | `metadata.py` | PNG `tEXt` / `iTXt` 块纯函数读写。读：ComfyUI 原生字段；写：只写 `xyz_gallery.*` 前缀的块；write-temp + rename。 | 绝不修改原有 ComfyUI 块（C-6，FR-23）；纯函数无副作用。 |
 | `metadata_sync.py` ★【新】 | 异步 PNG 同步 Worker：消费 `image.metadata_sync_status='pending'` 队列，调用 `metadata.write_xyz_chunks`，成功后通过 `repo.WriteQueue` 把状态置 `ok`，失败置 `failed` 并按指数回退重试（最多 3 次）。 | DB 已是事实来源，PNG 写失败 **不回滚** DB；UI 通过状态字段感知。 |
 | `thumbs.py` | WebP 生成（Pillow + ProcessPool）、磁盘缓存寻址、LRU 淘汰、按需生成。**请求队列采用 LIFO**：用户视口请求总是后进先出，避免被冷启动批量任务阻塞（§4.9）。 | 永不批量加载，内存峰值 ≤ 300 MB（NFR-7）；视口请求 P95 < 200 ms。 |
-| `watcher.py` | 每个注册根挂一个 `watchdog` Observer；事件先入 `Coalescer` 合并、去抖、溢出降级。**新增心跳线程**：每 30 s 触发一次轻量级 `indexer.delta_scan`（仅做 `(size, mtime_ns)` 比对），作为事件丢失的兜底（§4.10）。 | 事件流 O(1) DB 写成本；不丢事件（事件 + 周期补偿双保险）。 |
+| `watcher.py` | 每个注册根挂一个 `watchdog` Observer；事件先入 `Coalescer` 合并、去抖、溢出降级。**新增心跳线程**：每 30 s 触发一次轻量级 `indexer.delta_scan`（仅做 `(size, mtime_ns)` 比对），作为事件丢失的兜底（§4.10）。**目录** create/delete/move（根内、非 `_thumbs` 排除）经同一 Coalescer **250ms** 去抖触发 `reconcile_folders_under_root`。 | 事件流 O(1) DB 写成本；不丢事件（事件 + 周期补偿双保险）。 |
 | `ws_hub.py` | WebSocket 连接池 + 广播。事件类型新增 `image.sync_status_changed`（PNG 同步成功/失败时由 `metadata_sync` 触发）。 | Fire-and-forget；一致性兜底由前端焦点对账完成。 |
 | `folders.py` | 注册根目录的 CRUD；持久化到 `gallery_config.json`。 | 禁止重叠的自定义根。 |
 | `paths.py` | 所有来自客户端的路径必须经过 `resolve()` 且落在某个注册根内。 | 任何文件操作前的最后一道闸。 |
@@ -114,8 +116,8 @@ ComfyUI-XYZNodes/
 | `gallery_topbar.js` | 通过 `app.registerExtension` 在 ComfyUI 顶栏挂一个按钮，点击 `window.open('/xyz/gallery')`。 |
 | `app.js` | SPA 入口：初始化 router、store、建立 WS 连接、挂载根视图。 |
 | `api.js` | 薄客户端：REST 调用 + WS 订阅 + 错误信封解析。 |
-| `views/MainView` | 组合 `FolderTree` + 过滤器面板 + 顶部工具栏 + `VirtualGrid`。 |
-| `views/DetailView` | 渲染左图右元数据双栏；处理缩放 / 上一张 / 下一张；**显示 `metadata_sync_status` 与"重试同步"按钮**。 |
+| `views/MainView` | 组合 `FolderTree` + 过滤器面板 + 顶部工具栏 + `VirtualGrid`。**布局**（*Updated due to runtime implementation / QA feedback*）：可拖调整侧栏宽度与「筛选区 / 目录树」高度分配（`localStorage` 持久化）；筛选区独立滚动。WS **`image.upserted`**：若当前网格 **不含** 该行 id，则 **防抖全量重拉列表**（`resetAndFetch`），以接 OS 侧新增/改名；否则仍走单行合并刷新。 |
+| `views/DetailView` | 渲染左图右元数据多区块（*Updated due to runtime implementation / QA feedback*）：缩放、**滚轮**缩放、**←/→** 邻居导航（可编辑区不抢方向键）、元数据分块、**positive** 原文/归一化、内联 **filename**/tag/favorite/重命名（`move`）、Gallery 区**不**放 Version·Sync/侧栏 resync；**显示 `metadata_sync_status` 与"重试同步"按钮**（在 **Operations** 等约定位置）。`GET /image/{id}` 的 **`metadata.positive_prompt_normalized`** 供归一化切换。 |
 | `components/VirtualGrid` | 仅渲染可视视口 ± 2 屏的卡片（NFR-6）。 |
 | `components/ThumbCard` | 缩略图 + 文件名 + 收藏按钮 + 右键菜单 + Bulk checkbox + **同步状态徽标**（`pending` 黄、`failed` 红）。 |
 | `components/Autocomplete` | 前缀触发、debounce、前缀结果 LRU 缓存、键盘导航。 |
@@ -194,7 +196,8 @@ ComfyUI-XYZNodes/
                             │   ws_hub   │──► image.updated /         ──►  stores/connection
                             └────────────┘    image.sync_status_changed     │
                                                                             ▼
-                                                              filters 命中判断 → 补丁 VirtualGrid
+                                                              filters 命中判断 → 补丁 VirtualGrid；
+                                                              若 upsert 的 id 不在当前 items 则防抖全量重拉（接 OS 新增/改名）
 ```
 
 **关键不变式**
@@ -642,7 +645,25 @@ tokenize = "unicode61
 
 **交付**：1 000 张批量移动中途 kill 进程，重启后 30 s 内 DB 与磁盘完全一致；用户 PATCH 不被批量饿死。
 
-### MVP-L4：规模优化与长尾（按需）
+### Pre-L4 stabilization（v1.1，体验与数据口径收尾）
+
+> 对应 `PROJECT_SPEC §11`、`gallery_update_description.md`。**不**替换上文 L0–L3，仅描述 **MVP 之后、L4 之前** 的增量束。
+
+**目标**：在启用 L4（缩略调度、进程池、FTS5）之前，冻结「索引进集」「`prompt_token` 语义」「缩略图/cache 物理位置」「下载导出策略」等口径，避免 T26–T28 建立在错误数据子集或即将废弃的归一化规则上。
+
+**典型交付物（映射 TASKS T29–T37，见 `TASKS.md`）**：
+
+| 类别 | 内容 |
+| --- | --- |
+| **DM** | 排除 `output/_thumbs` 等衍生物路径或迁移缓存；`_` → 空格策略与 §8.8 v1.1 流水线修订；必要时 schema 小版本迁移 |
+| **API** | 扩展 `FilterSpec` / wire query（metadata 有无、prompt 三种 match；**word** 档 → **`GET /vocab/words`** + `word_token` / `image_word_token`，见 `TASKS.md` T32 *Scope supplement*）；文件夹写 API（若目录树 CRUD 未在 HTTP 暴露则补齐）；**`GET|PATCH /preferences`**（含 `download_variant` / **`download_prompt_each_time`**）；**`GET /raw/{id}/download?variant=`** 与 **`metadata.build_png_download_bytes`**（`clean` 含 `parameters` 剔除）；**`GET /admin/tags`** 分页体 **`{tags,total}`**；**`GET /image/{id}`（及列表同源 DTO）** 嵌套 **`metadata.positive_prompt_normalized`**（T30 词表管线，V1.1-F12）（*Updated due to runtime implementation / QA feedback*） |
+| **UI** | 目录树折叠与右键；网格框选 / Shift；拖放到目录；**Settings hash overlay**（`#/settings` / `#/image/:id/settings`、遮罩关闭、保存反馈）；tag 管理服务端分页控件；Light/Dark 与全局视觉（含滚动条）（*Updated due to runtime implementation / QA feedback*） |
+
+**与 L4 的纪律**：见 `PROJECT_SPEC §11.2` — **F11 / F13 / F05** 类实为 L4 **硬前置**；纯 UI 可并行但需分支规划。
+
+### MVP-L4：规模优化与长尾（按需）— **v1.1 起默认推迟至 Pre-L4 完成之后**
+
+> **Deferred reason**：在 v1.1 完成索引排除、缩略缓存落位、`normalize_prompt` 修订与全量 `prompt_token` 再衍生之前启动 **T26 `/thumb` Scheduler + janitor**、**T27 ProcessPool**、**T28 FTS5**，会导致重复全库重建与性能基线失真。日程上 **Pre-L4（T29–T37）先行**，L4 **队列冻结**直至 `PROJECT_STATE` 解除 defer。
 
 1. **`thumbs.Scheduler` LIFO 视口优先 + 取消**（缩略图目录逼近 2 GB 时 LRU 淘汰也在此层）。
 2. **`indexer` 元数据解析 ProcessPool（2~4 worker）**。
@@ -652,7 +673,7 @@ tokenize = "unicode61
 6. 自定义根目录管理 UI。
 7. `/index/rebuild` 端点。
 8. dedupe 视图。
-9. Prompt autocomplete + `/vocab/prompts`。
+9. Prompt / word autocomplete：`/vocab/prompts`、`/vocab/words`（*Updated due to runtime implementation / QA feedback*）。
 
 ### MVP 依赖图
 
@@ -661,7 +682,8 @@ L0 骨架
  └─► L1 只读回路 + WriteQueue 底座 ────────────────► 解决"看图" + 杜绝写竞争
       └─► L2 编辑 + 实时 + 异步同步 ──────────────► 解决"管理" + 写延迟解耦
            └─► L3 批量操作 + 心跳兜底 ────────────► 解决"规模化操作" + 不丢事件
-                └─► L4 性能与长尾（LIFO/进程池/分词器） ► 随规模增长投入
+                └─► Pre-L4 v1.1（索引/词表/UI 收口） ──► **现行默认必须先于 L4**
+                         └─► L4 性能与长尾（LIFO/进程池/分词器） ► 解除 defer 后投入
 ```
 
 ---

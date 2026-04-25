@@ -107,9 +107,11 @@
   }
 
   // --- (4) Download ---
-  const dlImg = acts && acts.querySelector('a[href*="/raw/"][href*="/download"]');
-  if (dlImg && dlImg.hasAttribute('download')) ok('Download image <a download> href=/raw/<id>/download');
-  else bad('Download image <a download>', `href=${dlImg ? dlImg.getAttribute('href') : 'not found'}`);
+  const dlBtn = acts && Array.from(acts.querySelectorAll('button')).find(
+    (b) => /download image/i.test(b.textContent || ''),
+  );
+  if (dlBtn && !dlBtn.disabled) ok('Download image button (T35 api.downloadImage)');
+  else bad('Download image button', dlBtn ? `disabled=${dlBtn.disabled}` : 'not found');
 
   // --- (8) Copy-to-clipboard ---
   const copyBtn = meta && meta.querySelector('.dv-copy');

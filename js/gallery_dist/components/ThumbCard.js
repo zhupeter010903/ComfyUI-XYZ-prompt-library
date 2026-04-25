@@ -85,7 +85,9 @@ export const ThumbCard = defineComponent({
                 :class="{ active: isFav }"
                 :aria-pressed="isFav ? 'true' : 'false'"
                 :title="isFav ? 'Unfavorite' : 'Favorite'"
-                @click="onFavClick">★</button>
+                @click="onFavClick">
+          <span class="tc-fav-icon" aria-hidden="true">{{ isFav ? '♥' : '♡' }}</span>
+        </button>
       </div>
       <div class="tc-name" :title="item.filename || ''">{{ item.filename }}</div>
     </div>
