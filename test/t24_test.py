@@ -215,6 +215,43 @@ def test_update_image_path_op() -> None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def test_execute_move_keeps_metadata_sync_ok() -> None:
+    """Pure on-disk move: row path/version update without PNG metadata_sync queue."""
+    import gallery as gallery_mod
+    from gallery import db
+    from gallery import repo as g_repo
+    from gallery import service as g_service
+
+    db_path, scratch, _id_a, id_b, _i1, i2, _ = _scratch_two_roots_move()
+    try:
+        wq = g_repo.WriteQueue(db_path)
+        wq.start()
+        gallery_mod._write_queue = wq
+        try:
+            sel = g_repo.SelectionSpec(mode="explicit", explicit_ids=(i2,))
+            plan = g_service.preflight_move(sel, id_b, db_path=db_path)
+            out = g_service.execute_move(plan["plan_id"], None, db_path=db_path)
+            assert int(out.get("moved", 0)) >= 1
+            rconn = db.connect_read(db_path)
+            try:
+                row = rconn.execute(
+                    "SELECT metadata_sync_status, path FROM image WHERE id=?",
+                    (i2,),
+                ).fetchone()
+            finally:
+                rconn.close()
+            assert row is not None
+            assert (row["metadata_sync_status"] or "ok") == "ok"
+            assert "vol_b" in str(row["path"])
+        finally:
+            wq.stop()
+            gallery_mod._write_queue = None
+    finally:
+        import shutil
+
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def test_preflight_conflict_and_execute() -> None:
     import gallery as gallery_mod
     from gallery import repo as g_repo
@@ -317,6 +354,7 @@ def test_move_single_collision_suggestion() -> None:
 def _run() -> None:
     test_fetch_selection_move_sources()
     test_update_image_path_op()
+    test_execute_move_keeps_metadata_sync_ok()
     test_preflight_conflict_and_execute()
     test_preflight_insufficient_space()
     test_move_single_collision_suggestion()

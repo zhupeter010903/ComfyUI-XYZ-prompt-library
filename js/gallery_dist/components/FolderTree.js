@@ -1,4 +1,6 @@
 // components/FolderTree.js — T12 read + T33 collapse, context menu, folder HTTP.
+// API 的 `kind` 是建库/子目录时写入的「所属根」用途分类（output|input|custom）；
+// 不展示在 UI 上；移动后若未迁库更新可能与当前父级不一致，勿当「当前从属」读。
 //
 // Collapsed node ids persist in localStorage (``xyz_gallery.foldertree.collapsed.v2``).
 // Modals match MovePicker / gallery shell (no ``window.prompt`` / ``alert``).
@@ -31,6 +33,13 @@ function _writeCollapsed(obj) {
   }
 }
 
+/** 层级缩进/竖向引导条数量（0..n，上限防极端深度） */
+function _rangeDepthGuides(depth) {
+  const c = Math.max(0, Math.min(32, Math.floor(depth)));
+  if (!c) return [];
+  return Array.from({ length: c }, (_, i) => i);
+}
+
 function flattenVisible(nodes, depth, collapsedMap, out) {
   for (const n of nodes || []) {
     out.push({ ...n, depth });
@@ -49,6 +58,8 @@ export const FolderTree = defineComponent({
     nodes: { type: Array, required: true },
     selectedId: { type: Number, default: null },
     recursive: { type: Boolean, default: false },
+    /** 若主视图把 Recursive 放在 «Folders» 标题行，设 false 以隐藏本组件内工具条。 */
+    showRecursiveButton: { type: Boolean, default: true },
   },
   emits: ['select', 'update:recursive', 'folders-changed'],
   setup(props, { emit }) {
@@ -327,11 +338,11 @@ export const FolderTree = defineComponent({
       try {
         const purge = p && !p.error && !p.can_empty_delete;
         await api.del(`/folders/${id}`, { query: purge ? { purge_files: true } : undefined });
+        deleteBusy.value = false;
         closeDeleteModal();
         await notify();
       } catch (e) {
         showToast((e && e.message) ? String(e.message) : String(e), 'err');
-      } finally {
         deleteBusy.value = false;
       }
     }
@@ -410,6 +421,7 @@ export const FolderTree = defineComponent({
     });
 
     return {
+      rangeDepthGuides: _rangeDepthGuides,
       flat,
       collapsedMap,
       menu,
@@ -450,7 +462,7 @@ export const FolderTree = defineComponent({
   },
   template: `
     <div class="ft">
-      <div class="ft-toolbar">
+      <div v-if="showRecursiveButton" class="ft-toolbar">
         <button type="button"
                 class="ft-recursive"
                 :aria-pressed="recursive ? 'true' : 'false'"
@@ -459,34 +471,53 @@ export const FolderTree = defineComponent({
         </button>
       </div>
       <ul class="ft-list" @click="closeMenu">
-        <li>
-          <a href="#"
-             class="ft-node ft-all"
-             :class="{ active: selectedId === null }"
-             @click.prevent="onSelect(null)">
-            All folders
-          </a>
+        <li class="ft-row">
+          <span class="ft-row-inner">
+            <span class="ft-chev-spacer" aria-hidden="true"></span>
+            <a href="#"
+               class="ft-node ft-all"
+               :class="{ active: selectedId === null }"
+               title="Show images from all roots"
+               @click.prevent="onSelect(null)">
+              <span class="ft-ico" aria-hidden="true">
+                <svg class="ft-svg" viewBox="0 0 24 24" width="16" height="16" focusable="false" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+              </span>
+              <span class="ft-label-wrap">All folders</span>
+            </a>
+          </span>
         </li>
         <li v-for="n in flat" :key="n.id" class="ft-row">
-          <span class="ft-row-inner"
-                :style="{ paddingLeft: (4 + n.depth * 14) + 'px' }">
+          <span class="ft-row-inner">
+            <span v-for="d in rangeDepthGuides(n.depth)" :key="'g'+n.id+'-'+d" class="ft-guide" aria-hidden="true"></span>
             <button v-if="hasChildren(n)"
                     type="button"
                     class="ft-chev"
                     :aria-expanded="collapsedMap[n.id] ? 'false' : 'true'"
                     :title="collapsedMap[n.id] ? 'Expand' : 'Collapse'"
                     @click="onToggleCollapse(n.id, $event)">
-              {{ collapsedMap[n.id] ? '▶' : '▼' }}
+              <svg v-if="collapsedMap[n.id]" class="ft-svg" viewBox="0 0 24 24" width="16" height="16" focusable="false" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9.75 5.5 16.5 12 9.75 18.5" />
+              </svg>
+              <svg v-else class="ft-svg" viewBox="0 0 24 24" width="16" height="16" focusable="false" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5.5 9.75 12 16.25 18.5 9.75" />
+              </svg>
             </button>
-            <span v-else class="ft-chev-spacer"></span>
+            <span v-else class="ft-chev-spacer" aria-hidden="true"></span>
             <a href="#"
                class="ft-node"
                :class="{ active: selectedId === n.id }"
                :title="n.path"
                @click.prevent="onSelect(n.id)"
                @contextmenu="onCtxMenu(n, $event)">
-              <span class="ft-kind" v-if="n.kind">[{{ n.kind }}]</span>
-              {{ labelOf(n) }}<span class="ft-count muted">{{ countSuffix(n) }}</span>
+              <span class="ft-ico" aria-hidden="true">
+                <svg class="ft-svg" viewBox="0 0 24 24" width="16" height="16" focusable="false" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+              </span>
+              <span class="ft-label-wrap">{{ labelOf(n) }}<span class="ft-count muted">{{ countSuffix(n) }}</span>
+              </span>
             </a>
           </span>
         </li>

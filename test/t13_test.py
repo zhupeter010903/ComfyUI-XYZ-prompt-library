@@ -176,11 +176,12 @@ def _assert_main_view_contract() -> None:
     assert "mv-toolbar" in body
     assert 'type="range"' in body
     assert 'min="2"' in body and 'max="12"' in body
-    # Sort dropdown (FR-9b): key:dir pairs.
-    assert "SORT_OPTIONS" in body
-    for pair in ("time:desc", "time:asc", "name:asc", "size:desc",
-                 "folder:asc"):
-        assert pair in body, f"sort option missing: {pair}"
+    # Sort: key dropdown + direction toggle (T45 UX refresh of FR-9b).
+    assert "SORT_KEY_OPTIONS" in body
+    assert "toggleSortDir" in body
+    assert 'v-model="sort.key"' in body
+    for needle in ("value: 'time'", "value: 'name'", "value: 'size'", "value: 'folder'"):
+        assert needle in body, f"sort key option missing: {needle!r}"
     # Grid wire-up.
     assert "<VirtualGrid" in body
     assert ":cards-per-row=\"layoutState.cardsPerRow\"" in body

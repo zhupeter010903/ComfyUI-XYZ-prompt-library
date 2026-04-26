@@ -32,6 +32,8 @@ def test_is_derivative_path_excluded() -> None:
         assert not indexer.is_derivative_path_excluded(str(good.resolve()), rp)
         assert indexer.is_derivative_path_excluded(str(bad.resolve()), rp)
         assert indexer.is_derivative_path_excluded(str(nested.resolve()), rp)
+        atomic = root / "shots" / ".xyz_gallery_atomic" / ".xyz_gallery_abcd.png"
+        assert indexer.is_derivative_path_excluded(str(atomic.resolve()), rp)
         edge = root / "my_thumbs" / "z.png"
         _make_png(edge)
         assert not indexer.is_derivative_path_excluded(str(edge.resolve()), rp)

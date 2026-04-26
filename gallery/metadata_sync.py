@@ -2,13 +2,16 @@
 
 Drains ``notify(image_id, version)`` hints plus a periodic patrol over
 ``metadata_sync_status != 'ok'``, calls :func:`metadata.write_xyz_chunks`,
-then records outcomes exclusively via ``repo.WriteQueue`` at LOW priority
-(ARCHITECTURE §4.6 / §4.8).
+then records outcomes via ``repo.WriteQueue``: successful PNG writes use
+``HIGH`` :class:`repo.SetSyncStatusOp` so ``file_size`` / ``mtime_ns`` match
+disk before the file watcher debounce fires, avoiding redundant upserts.
+Failures remain ``LOW`` (ARCHITECTURE §4.6 / §4.8).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -24,6 +27,7 @@ __all__ = [
     "start_metadata_sync_worker",
     "stop_metadata_sync_worker",
     "notify",
+    "queue_many",
 ]
 
 _POLL_SEC = 1.0
@@ -100,6 +104,26 @@ def notify(image_id: int, version: int) -> None:
     _wake.set()
 
 
+def queue_many(updates: Dict[int, int]) -> None:
+    """Merge many ``(image_id, version)`` into ``_pending`` in one lock + one wake (T44).
+
+    The worker still calls ``attempt_sync_write`` for each id on a tick; this
+    only reduces
+    redundant event-loop wakes from N ``notify`` calls in bulk / tag admin loops.
+    """
+    if not updates:
+        return
+    with _notify_lock:
+        for iid, ver in updates.items():
+            ii, vv = int(iid), int(ver)
+            old = _pending.get(ii)
+            if old is None:
+                _pending[ii] = vv
+            else:
+                _pending[ii] = max(int(old), vv)
+    _wake.set()
+
+
 def _worker_loop() -> None:
     while not _stop.is_set():
         triggered = _wake.wait(timeout=_POLL_SEC)
@@ -142,7 +166,13 @@ def _tick() -> None:
         iid, ver = int(r[0]), int(r[1])
         merged[iid] = max(merged.get(iid, -1), ver)
     for iid, ver in merged.items():
-        attempt_sync_write(_db_path, _write_queue, iid, ver)
+        try:
+            attempt_sync_write(_db_path, _write_queue, iid, ver)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "metadata_sync: attempt_sync_write failed id=%s ver=%s",
+                iid, ver,
+            )
 
 
 def attempt_sync_write(
@@ -207,7 +237,13 @@ def attempt_sync_write(
         return
 
     try:
-        _metadata.write_xyz_chunks(path, tags_csv, fav_arg)
+        staging = Path(db_path).parent / ".xyz_gallery_atomic"
+        _metadata.write_xyz_chunks(
+            path,
+            tags_csv,
+            fav_arg,
+            atomic_staging_dir=staging,
+        )
     except Exception as exc:
         logger.warning(
             "metadata_sync write failed id=%s ver=%s: %s",
@@ -232,11 +268,15 @@ def attempt_sync_write(
         )
         return
 
+    st_disk = os.stat(path)
+    mtime_ns = int(getattr(st_disk, "st_mtime_ns", int(st_disk.st_mtime * 1e9)))
     fut = write_queue.enqueue_write(
-        _repo.LOW,
+        _repo.HIGH,
         _repo.SetSyncStatusOp(
             image_id=int(image_id),
             expected_version=int(task_version),
+            refresh_file_size=int(st_disk.st_size),
+            refresh_mtime_ns=mtime_ns,
         ),
     )
     fut.result(timeout=30.0)

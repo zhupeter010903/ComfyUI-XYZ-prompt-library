@@ -843,6 +843,19 @@ def _read_index_status() -> dict:
     }
 
 
+def _read_jobs_active() -> dict:
+    from . import job_registry as _jr
+    return {"jobs": _jr.list_active()}
+
+
+async def _get_jobs_active(_request: web.Request) -> web.Response:
+    try:
+        return web.json_response(await _run(_read_jobs_active))
+    except Exception as exc:
+        logger.exception("jobs/active failed")
+        return _error(500, "internal", str(exc))
+
+
 async def _get_index_status(request: web.Request) -> web.Response:
     try:
         return web.json_response(await _run(_read_index_status))
@@ -1711,6 +1724,7 @@ def register(server) -> None:
     routes.get("/xyz/gallery/vocab/words")(_get_vocab_words)
     routes.get("/xyz/gallery/vocab/models")(_get_vocab_models)
     routes.get("/xyz/gallery/index/status")(_get_index_status)
+    routes.get("/xyz/gallery/jobs/active")(_get_jobs_active)
     routes.get("/xyz/gallery/images")(_list_images)
     routes.get("/xyz/gallery/images/count")(_images_count)
     routes.get(r"/xyz/gallery/image/{id:\d+}")(_get_image)

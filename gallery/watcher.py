@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .repo import WriteQueue  # noqa: F401
@@ -22,11 +22,61 @@ logger = logging.getLogger("xyz.gallery.watcher")
 __all__ = [
     "Coalescer",
     "merge_watcher_state",
+    "register_moved_subtree_bypass",
     "start_file_watchers",
     "stop_file_watchers",
     "start_heartbeat",
     "stop_heartbeat",
 ]
+
+# After ``RelocateFolderSubtree`` + Reconcile, the API already matches DB to
+# disk. Watchdog will still emit delete+create per file; we skip d/u for the
+# exact same paths to mirror bulk move (no redundant ``index_one``/``delete``).
+_moved_bypass: List[Tuple[frozenset, frozenset, float]] = []
+_moved_bypass_lock = threading.Lock()
+MOVED_SUBTREE_BYPASS_TTL_S: float = 20.0
+
+
+def register_moved_subtree_bypass(
+    old_paths: Set[str] | None,
+    new_paths: Set[str] | None,
+    *,
+    ttl_s: float = MOVED_SUBTREE_BYPASS_TTL_S,
+) -> None:
+    """Let the coalescer drop ``d``/``u`` for paths from a just-completed
+    in-app folder subtree move/rename (``RelocateFolderSubtree`` already ran).
+    """
+    o = frozenset(str(x) for x in (old_paths or ()))
+    n = frozenset(str(x) for x in (new_paths or ()))
+    if not o and not n:
+        return
+    until = time.monotonic() + max(1.0, float(ttl_s))
+    with _moved_bypass_lock:
+        t = time.monotonic()
+        # Drop expired
+        _moved_bypass[:] = [x for x in _moved_bypass if x[2] > t]
+        _moved_bypass.append((o, n, until))
+
+
+def _bypasses_watcher_path_event(last_path: str, ev: str) -> bool:
+    from . import repo as _repo
+
+    t = time.monotonic()
+    pn = _repo._norm_fs_path(str(last_path))
+    e = (ev or "").lower()
+    with _moved_bypass_lock:
+        i = 0
+        while i < len(_moved_bypass):
+            so, sn, until = _moved_bypass[i]
+            if until < t:
+                _moved_bypass.pop(i)
+                continue
+            if e == "d" and so and pn in so:
+                return True
+            if e == "u" and sn and pn in sn:
+                return True
+            i += 1
+    return False
 
 _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
@@ -137,8 +187,12 @@ class _DeltaArmer:
         from . import indexer as _indexer
         while True:
             try:
+                # No ``job_id``: a full-tree walk can take minutes and would steal
+                # the ProgressModal from the file-watcher session (T44). Drift
+                # still goes out via ``_fan_out_delta_scan_result`` / index.drift.
                 st = _indexer.delta_scan(
                     self._root, db_path=self._db_path, write_queue=self._write_queue,
+                    job_id=None,
                 )
                 _fan_out_delta_scan_result(self._root, st)
             except Exception:
@@ -162,8 +216,17 @@ class Coalescer:
 
     DEBOUNCE_S: float = 0.25
     FLUSH_MAX: int = 50
-    HIGH_WATERMARK: int = 500
+    # Each move ≈2 keys (delete+upsert). 500 overflowed on ~250 files and
+    # started a full-tree ``delta_scan`` with its own T44 job, hijacking the UI.
+    HIGH_WATERMARK: int = 2048
     _TICK_S: float = 0.05
+    # Match ``T44_BULK_MODAL_MIN_ROWS`` (stores/galleryProgress.js): no modal for
+    # tiny flushes; bulk moves/renames typically exceed this.
+    WATCHER_PROGRESS_MIN: int = 12
+    # After the last op in a run, wait this long (empty buffer) before
+    # ``index.done`` — a second batch of OS events (large moves) can arrive
+    # seconds later; merge them into the same job instead of two modals.
+    WATCHER_SESSION_END_DELAY_S: float = 2.5
 
     def __init__(self, *, root: Dict[str, Any], db_path: Any, write_queue: Any, delta: _DeltaArmer) -> None:
         self._root = root
@@ -177,6 +240,10 @@ class Coalescer:
             target=self._tick_loop, name="xyz-gallery-coalescer", daemon=True,
         )
         self._folder_mono: Optional[float] = None
+        self._watcher_job_id: Optional[str] = None
+        self._watcher_cum_done: int = 0
+        self._watcher_cum_planned: int = 0
+        self._watcher_end_timer: Optional[threading.Timer] = None
 
     def start(self) -> None:
         self._tick.start()
@@ -189,6 +256,8 @@ class Coalescer:
 
     def add(self, key: str, last_path: str, ev: str) -> None:
         """``ev`` ∈ ``'u'`` (upsert) 或 ``'d'`` (delete).  ``key``= indexer 去重 key。"""
+        if _bypasses_watcher_path_event(str(last_path), str(ev)):
+            return
         _note_coalescer_event()
         do_overflow = False
         with self._lock:
@@ -205,17 +274,77 @@ class Coalescer:
                 self._buf.clear()
                 do_overflow = True
         if do_overflow:
+            from . import job_registry as _jobs
             from . import service as _service
+            with self._lock:
+                wjid = self._watcher_job_id
+                r_id = int(self._root["id"])
+                self._watcher_job_id = None
+                self._watcher_cum_done = 0
+                self._watcher_cum_planned = 0
+            if wjid is not None:
+                _jobs.emit_index_done(
+                    str(wjid), root_id=r_id, phase="", ok=0, failed=1,
+                )
             _service.broadcast_index_overflow(int(self._root["id"]))
             self._delta.request()
             logger.info("coalescer overflow → delta_scan (root_id=%s)", self._root.get("id"))
+        self._cancel_watcher_end_timer()
 
     def mark_folder_reconcile(self) -> None:
         with self._lock:
             self._folder_mono = time.monotonic()
 
+    def _cancel_watcher_end_timer(self) -> None:
+        t = self._watcher_end_timer
+        if t is not None:
+            try:
+                t.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+            self._watcher_end_timer = None
+
+    def _schedule_watcher_end_timer(self) -> None:
+        self._cancel_watcher_end_timer()
+        t = threading.Timer(
+            self.WATCHER_SESSION_END_DELAY_S,
+            self._watcher_on_idle,
+        )
+        t.daemon = True
+        self._watcher_end_timer = t
+        t.start()
+
+    def _watcher_on_idle(self) -> None:
+        from . import indexer as _indexer
+        from . import job_registry as _jobs
+
+        jid: Optional[str] = None
+        r_id: int = int(self._root["id"])
+        with self._lock:
+            self._watcher_end_timer = None
+            if not self._watcher_job_id:
+                return
+            if self._buf:
+                self._schedule_watcher_end_timer()
+                return
+            jid = str(self._watcher_job_id)
+            self._watcher_job_id = None
+            self._watcher_cum_done = 0
+            self._watcher_cum_planned = 0
+        # Folder `image_count_*` in SQLite must match the image table *before* the
+        # client leaves the progress modal, or the tree keeps ticking after "done".
+        _indexer.reconcile_folders_under_root_block(
+            self._root,
+            db_path=self._db_path,
+            write_queue=self._write_queue,
+        )
+        _jobs.emit_index_done(
+            jid, root_id=r_id, phase="", ok=1, failed=0,
+        )
+
     def _tick_loop(self) -> None:
         from . import indexer as _indexer
+        from . import job_registry as _jobs
         from . import service as _service
 
         while not self._stop.is_set():
@@ -231,28 +360,93 @@ class Coalescer:
                     self._buf.pop(k, None)
             if to_flush:
                 _note_coalescer_flush(len(to_flush))
-            for i in range(0, len(to_flush), self.FLUSH_MAX):
-                chunk = to_flush[i: i + self.FLUSH_MAX]
-                for _k, pend in chunk:
-                    if pend.act == "d":
-                        iid = _indexer.delete_one(
-                            pend.path, db_path=self._db_path, write_queue=self._write_queue,
+            nflush = len(to_flush)
+            root_id = int(self._root["id"])
+            w_msg = "Syncing file system changes"
+            wjid: Optional[str] = None
+            if nflush:
+                in_sess = self._watcher_job_id is not None
+                if in_sess or nflush >= self.WATCHER_PROGRESS_MIN:
+                    with self._lock:
+                        if self._watcher_job_id is not None:
+                            wjid = str(self._watcher_job_id)
+                            self._watcher_cum_planned += nflush
+                            planned = int(self._watcher_cum_planned)
+                            done0 = int(self._watcher_cum_done)
+                        else:
+                            wjid = str(_jobs.new_job_id())
+                            self._watcher_job_id = wjid
+                            self._watcher_cum_done = 0
+                            self._watcher_cum_planned = int(nflush)
+                            planned = int(nflush)
+                            done0 = 0
+                    if in_sess and self._watcher_job_id and done0 < planned:
+                        _jobs.emit_index_progress(
+                            wjid,
+                            done=done0,
+                            total=planned,
+                            root_id=root_id,
+                            phase="",
+                            message=w_msg,
                         )
-                        if iid is not None:
-                            _service.broadcast_image_deleted(int(iid))
-                    else:
-                        if not _is_image_name(os.path.basename(pend.path)):
-                            continue
-                        if _is_derivative_excluded_path(
-                            pend.path, str(self._root["path"]),
-                        ):
-                            continue
-                        iid = _indexer.index_one(
-                            pend.path, root=self._root, db_path=self._db_path,
-                            write_queue=self._write_queue,
+                    if not in_sess and wjid:
+                        _jobs.start_index_job(
+                            wjid,
+                            kind="index",
+                            root_id=root_id,
+                            phase="",
+                            message=w_msg,
+                            total=planned,
                         )
-                        if iid is not None:
-                            _service.broadcast_image_upserted(int(iid))
+            try:
+                for i in range(0, nflush, self.FLUSH_MAX):
+                    chunk = to_flush[i: i + self.FLUSH_MAX]
+                    for _k, pend in chunk:
+                        if pend.act == "d":
+                            iid = _indexer.delete_one(
+                                pend.path,
+                                db_path=self._db_path,
+                                write_queue=self._write_queue,
+                            )
+                            if iid is not None:
+                                _service.broadcast_image_deleted(int(iid))
+                        else:
+                            if not _is_image_name(os.path.basename(pend.path)):
+                                pass
+                            elif _is_derivative_excluded_path(
+                                pend.path, str(self._root["path"]),
+                            ):
+                                pass
+                            else:
+                                iid = _indexer.index_one(
+                                    pend.path, root=self._root,
+                                    db_path=self._db_path,
+                                    write_queue=self._write_queue,
+                                )
+                                if iid is not None:
+                                    _service.broadcast_image_upserted(int(iid))
+                        if self._watcher_job_id is not None:
+                            with self._lock:
+                                self._watcher_cum_done += 1
+                                cd = int(self._watcher_cum_done)
+                                cp = int(self._watcher_cum_planned)
+                                jcur = str(self._watcher_job_id)
+                            if (
+                                cd == 1
+                                or cd == cp
+                                or (cd % 10 == 0 and cd < cp)
+                            ):
+                                _jobs.emit_index_progress(
+                                    jcur,
+                                    done=cd,
+                                    total=cp,
+                                    root_id=root_id,
+                                    phase="",
+                                    message=w_msg,
+                                )
+            finally:
+                if nflush and self._watcher_job_id is not None:
+                    self._schedule_watcher_end_timer()
 
             with self._lock:
                 fm = self._folder_mono
@@ -453,6 +647,8 @@ def _make_handler(coalescer: Coalescer, root_path: str) -> Any:
                 return
             if event.is_directory:
                 _dir_reconcile_if_tracked(p)
+                return
+            if _is_derivative_excluded_path(p, r):
                 return
             c.add(_as_key(p), p, "d")
 

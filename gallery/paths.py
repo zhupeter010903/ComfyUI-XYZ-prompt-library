@@ -20,10 +20,17 @@ __all__ = [
     "assert_inside_root",
     "is_derivative_path_excluded",
     "prune_derivative_walk_dirnames",
+    "XYZ_GALLERY_ATOMIC_DIRNAME",
 ]
 
 # T29 / V1.1-F11 — keep in sync with indexer walk pruning.
-_DERIVATIVE_EXCLUDED_DIR_NAMES: frozenset = frozenset({"_thumbs"})
+# ``.xyz_gallery_atomic`` — same-volume staging for ``metadata.write_xyz_chunks``;
+# must not be walked or indexed as user content (see ``metadata`` module).
+XYZ_GALLERY_ATOMIC_DIRNAME = ".xyz_gallery_atomic"
+# Case-folded directory segments under a root that are not user library paths.
+_DERIVATIVE_EXCLUDED_SEGMENTS_ICASE: frozenset = frozenset(
+    str(x).casefold() for x in ("_thumbs", XYZ_GALLERY_ATOMIC_DIRNAME)
+)
 
 _PathLike = Union[str, Path]
 
@@ -60,9 +67,9 @@ def assert_inside_root(path: _PathLike, roots: Iterable[_PathLike]) -> Path:
 def is_derivative_path_excluded(abs_path: str, root_path: str) -> bool:
     """True when ``abs_path`` is under a barred derivative directory (T29).
 
-    Matches any path component (directory segment) equal to ``_thumbs``
-    under ``root_path``. Folder-only paths such as ``…/output/_thumbs``
-    (single relative segment) are included.
+    Matches any path component (directory segment) equal to ``_thumbs`` or
+    :data:`XYZ_GALLERY_ATOMIC_DIRNAME` under ``root_path``. Folder-only paths
+    such as ``…/output/_thumbs`` (single relative segment) are included.
     """
     try:
         root_r = Path(str(root_path)).resolve(strict=False)
@@ -75,14 +82,14 @@ def is_derivative_path_excluded(abs_path: str, root_path: str) -> bool:
         return False
     to_scan = parts[:-1] if len(parts) > 1 else parts
     for seg in to_scan:
-        if str(seg).casefold() in _DERIVATIVE_EXCLUDED_DIR_NAMES:
+        if str(seg).casefold() in _DERIVATIVE_EXCLUDED_SEGMENTS_ICASE:
             return True
     return False
 
 
 def prune_derivative_walk_dirnames(dirnames: List[str]) -> None:
-    """Drop ``_thumbs`` (case-insensitive) from ``os.walk`` descent (T29)."""
+    """Drop derivative dir names (case-insensitive) from ``os.walk`` descent (T29)."""
     dirnames[:] = [
         d for d in dirnames
-        if str(d).casefold() not in _DERIVATIVE_EXCLUDED_DIR_NAMES
+        if str(d).casefold() not in _DERIVATIVE_EXCLUDED_SEGMENTS_ICASE
     ]

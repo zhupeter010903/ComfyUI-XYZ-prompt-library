@@ -32,6 +32,8 @@ VOCAB_CHANGED = "vocab.changed"
 IMAGE_SYNC_STATUS_CHANGED = "image.sync_status_changed"
 BULK_PROGRESS = "bulk.progress"
 BULK_COMPLETED = "bulk.completed"
+JOB_PROGRESS = "job.progress"
+JOB_COMPLETED = "job.completed"
 INDEX_DRIFT_DETECTED = "index.drift_detected"
 
 __all__ = [
@@ -44,6 +46,8 @@ __all__ = [
     "IMAGE_SYNC_STATUS_CHANGED",
     "BULK_PROGRESS",
     "BULK_COMPLETED",
+    "JOB_PROGRESS",
+    "JOB_COMPLETED",
     "INDEX_DRIFT_DETECTED",
     "get_last_event_ts",
     "broadcast",

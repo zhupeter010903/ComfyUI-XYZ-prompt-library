@@ -436,6 +436,45 @@ def test_sorts(db_path: Path, ref: dict) -> None:
     print("T09 sort keys x dirs OK")
 
 
+def test_folder_line_header_sort_order(db_path: Path, ref: dict) -> None:
+    """``SortSpec(folder)`` orders by UI line header, not ``image.path``."""
+    from gallery import repo
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        _insert_image(
+            conn,
+            path="/scratch/output/zzz_linehdr_root.png",
+            folder_id=ref["out_root"],
+            relative_path="zzz_linehdr_root.png",
+            filename="zzz_linehdr_root.png",
+            file_size=910, mtime_ns=9_100_000_000_000_000, created_at=910,
+        )
+        _insert_image(
+            conn,
+            path="/scratch/output/a_sub/linehdr_sub.png",
+            folder_id=ref["out_root"],
+            relative_path="a_sub/linehdr_sub.png",
+            filename="linehdr_sub.png",
+            file_size=920, mtime_ns=9_200_000_000_000_000, created_at=920,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    pg = repo.list_images(
+        db_path=db_path, sort=repo.SortSpec(key="folder", dir="asc"), limit=500,
+    )
+    names = [r.filename for r in pg.items]
+    assert names.index("zzz_linehdr_root.png") < names.index("linehdr_sub.png"), (
+        "root ``output`` section must sort before ``output/a_sub`` "
+        f"(got positions {names.index('zzz_linehdr_root.png')} vs "
+        f"{names.index('linehdr_sub.png')})"
+    )
+    print("T09 folder line-header sort OK")
+
+
 def test_total_estimate_cap(db_path: Path, ref: dict) -> None:
     from gallery import repo
     # Temporarily lower the cap to exercise the approximate branch
@@ -582,6 +621,7 @@ def main() -> None:
         test_filters(db_path, ref)
         test_folder_recursive(db_path, ref)
         test_sorts(db_path, ref)
+        test_folder_line_header_sort_order(db_path, ref)
         test_total_estimate_cap(db_path, ref)
         test_neighbors(db_path, ref)
         test_folder_tree(db_path, ref)

@@ -12,6 +12,8 @@
 > 5. **性能强化** — 缩略图 LIFO 视口优先、FTS5 分词器显式配置、indexer 元数据解析进程池化。
 
 > **v1.1 文档分层（增量）**：本文 **MVP-L4** 及以下旧述保留；**Pre-L4 stabilization（v1.1）** 以本节新增小节与 `PROJECT_SPEC §11` 为准。在 v1.1 索引/词表/缩略磁盘布局未收敛前，**推迟**启动 L4 任务（`TASKS.md` T26–T28），理由见 `PROJECT_STATE.md`。
+>
+> **Updated due to v1.2**：**§7**（`PROJECT_SPEC` §12 对应的实现蓝图）为 **v1.2** 设计增补；不修改 §1–§6 的既有**架构不变式**（C-1 单源 SQLite、`WriteQueue`、`ws_hub` 解耦、异步 PNG 等）。
 
 ---
 
@@ -45,6 +47,7 @@ ComfyUI-XYZNodes/
 │   ├── ws_hub.py                     WebSocket 广播枢纽
 │   ├── folders.py                    注册根目录管理（output/input/custom）
 │   ├── paths.py                      路径校验与沙箱
+│   ├── folder_header.py              ★【T45】`xyz_folder_line_header` UDF 体（与 `PROJECT_SPEC` §12.2 line header 一致）
 │   └── vocab.py                      prompt/tag 归一化 + 词表维护
 │
 ├── js/                               前端（由 ComfyUI 的 WEB_DIRECTORY 暴露）
@@ -58,6 +61,8 @@ ComfyUI-XYZNodes/
 │       │   └── DetailView.*          详情页 / 元数据面板 / 导航
 │       ├── components/
 │       │   ├── VirtualGrid.*         虚拟滚动网格
+│       │   ├── LineVirtualGrid.*     ★【T45】line 视图虚拟列表 + section
+│       │   ├── sectionKeys.js        ★【T45】`partitionItemsForLineView` 等与 §12.2 对齐
 │       │   ├── ThumbCard.*           单个缩略图卡片（★ 显示同步状态徽标）
 │       │   ├── FolderTree.*          目录树
 │       │   ├── Autocomplete.*        prompt / tag 建议
@@ -97,8 +102,8 @@ ComfyUI-XYZNodes/
 | `__init__.py` | 装配入口：确保 DB 文件存在、跑迁移、启动后台线程（含 WriteQueue 写入者、metadata_sync Worker、watcher 心跳）、注册路由。幂等。 | 不阻塞 ComfyUI 主事件循环（NFR-1）。 |
 | `routes.py` | aiohttp 处理器，**只做 I/O**：解析请求、校验形状、调用 `service`、序列化响应、设置缓存头。无业务逻辑。 | 任何 CPU/磁盘操作 > 5 ms 必须 `run_in_executor`（C-2）。 |
 | `service.py` | 用例编排层。把"列出图片"、"批量移动"等业务流程拆成对 `repo` / `indexer` / `thumbs` / `ws_hub` / `paths` / `metadata_sync` 的调用序列。事务边界与**写入优先级**归它决定。 | 所有跨模块副作用按"DB → enqueue PNG → 广播"的顺序保序。 |
-| `repo.py` | 唯一与 SQLite 交互的入口。**内嵌 `WriteQueue`（优先级队列）+ 单一写入者线程**；对外暴露同步读 API 与异步写入 API（`enqueue_write(priority, op)` 返回 `Future`）。拥有连接池、预编译语句、游标分页、tag-AND / prompt-AND 查询构造器、Selection 解析。**含 `ReconcileFoldersUnderRootOp`**：按注册根 walk 磁盘，补 INSERT 缺失子目录行、DELETE 已不存在路径的行（deepest-first），成功变更后 `ws_hub.broadcast(folder.changed, {root_id})`。 | 写并发 = 1（C-1 强化）；读并发不受影响（WAL）。 |
-| `db.py` | Schema DDL、前向兼容的版本化迁移、FTS5 虚拟表及其触发器、WAL / NORMAL / MMAP 等 PRAGMA。**显式声明 FTS5 分词器**（`unicode61` + `tokenchars` 配置，§4.7.2）。 | 迁移只前进不后退（C-4）。 |
+| `repo.py` | 唯一与 SQLite 交互的入口。**内嵌 `WriteQueue`（优先级队列）+ 单一写入者线程**；对外暴露同步读 API 与异步写入 API（`enqueue_write(priority, op)` 返回 `Future`）。拥有连接池、预编译语句、游标分页、tag-AND / prompt-AND 查询构造器、Selection 解析。**含 `ReconcileFoldersUnderRootOp`**：按注册根 walk 磁盘，补 INSERT 缺失子目录行、DELETE 已不存在路径的行（deepest-first），成功变更后 `ws_hub.broadcast(folder.changed, {root_id})`。**T45**：**`SortSpec.key=folder`** 时 **`list_images` / 游标 / `neighbors`** 使用 **`xyz_folder_line_header`**（与 **`PROJECT_SPEC` §12.2** line header 一致），**非** **`ORDER BY image.path`**。 | 写并发 = 1（C-1 强化）；读并发不受影响（WAL）。 |
+| `db.py` | Schema DDL、前向兼容的版本化迁移、FTS5 虚拟表及其触发器、WAL / NORMAL / MMAP 等 PRAGMA。**显式声明 FTS5 分词器**（`unicode61` + `tokenchars` 配置，§4.7.2）。**T45**：在 **`connect_read` / `connect_write`** 上 **`create_function('xyz_folder_line_header', …)`**（实现见 **`folder_header.py`**），供 **`repo.list_images`** 的 folder 排序与游标读取同一表达式。 | 迁移只前进不后退（C-4）。 |
 | `indexer.py` | 三个入口：冷启动全量扫描、单根 delta-scan、单事件 upsert。对每个文件走 `(size, mtime_ns)` 指纹短路。**元数据解析（CPU 密集）走 ProcessPool**；解析结果回流到主线程后**统一通过 `repo.WriteQueue` 入队**。每根 `cold_scan` / `delta_scan` 末尾调用 **`reconcile_folders_under_root`**（入队 `ReconcileFoldersUnderRootOp`，LOW）。 | 幂等（C-3）；解析并行，写入串行。 |
 | `metadata.py` | PNG `tEXt` / `iTXt` 块纯函数读写。读：ComfyUI 原生字段；写：只写 `xyz_gallery.*` 前缀的块；write-temp + rename。 | 绝不修改原有 ComfyUI 块（C-6，FR-23）；纯函数无副作用。 |
 | `metadata_sync.py` ★【新】 | 异步 PNG 同步 Worker：消费 `image.metadata_sync_status='pending'` 队列，调用 `metadata.write_xyz_chunks`，成功后通过 `repo.WriteQueue` 把状态置 `ok`，失败置 `failed` 并按指数回退重试（最多 3 次）。 | DB 已是事实来源，PNG 写失败 **不回滚** DB；UI 通过状态字段感知。 |
@@ -116,12 +121,13 @@ ComfyUI-XYZNodes/
 | `gallery_topbar.js` | 通过 `app.registerExtension` 在 ComfyUI 顶栏挂一个按钮，点击 `window.open('/xyz/gallery')`。 |
 | `app.js` | SPA 入口：初始化 router、store、建立 WS 连接、挂载根视图。 |
 | `api.js` | 薄客户端：REST 调用 + WS 订阅 + 错误信封解析。 |
-| `views/MainView` | 组合 `FolderTree` + 过滤器面板 + 顶部工具栏 + `VirtualGrid`。**布局**（*Updated due to runtime implementation / QA feedback*）：可拖调整侧栏宽度与「筛选区 / 目录树」高度分配（`localStorage` 持久化）；筛选区独立滚动。WS **`image.upserted`**：若当前网格 **不含** 该行 id，则 **防抖全量重拉列表**（`resetAndFetch`），以接 OS 侧新增/改名；否则仍走单行合并刷新。 |
-| `views/DetailView` | 渲染左图右元数据多区块（*Updated due to runtime implementation / QA feedback*）：缩放、**滚轮**缩放、**←/→** 邻居导航（可编辑区不抢方向键）、元数据分块、**positive** 原文/归一化、内联 **filename**/tag/favorite/重命名（`move`）、Gallery 区**不**放 Version·Sync/侧栏 resync；**显示 `metadata_sync_status` 与"重试同步"按钮**（在 **Operations** 等约定位置）。`GET /image/{id}` 的 **`metadata.positive_prompt_normalized`** 供归一化切换。 |
+| `views/MainView` | 组合 `FolderTree` + 过滤器面板 + 顶部工具栏 + `VirtualGrid`（及 v1.2 的 `view_mode=line` 时之 **行分组包装**，见 §7.4）。**布局**（*Updated due to runtime implementation / QA feedback*）：可拖调整侧栏宽度与「筛选区 / 目录树」高度分配（`localStorage` 持久化）；筛选区独立滚动。 **Folders 区**（*Updated due to T39 / QA*）：**`mv-folders-title-row`** 内 **「Folders」** 标题与 **Recursive on/off** **同一行**；向 `FolderTree` 传 **`:show-recursive-button="false"`** 以**不**在树顶重复内置 Recursive 条。WS **`image.upserted`**：若当前网格 **不含** 该行 id，则 **防抖全量重拉列表**（`resetAndFetch`），以接 OS 侧新增/改名；否则仍走单行合并刷新。 (*Updated due to v1.2*) **抗闪烁**策略见 **§7.2** / **§7.4**（**T43**：`folder.changed` **根门控**、静默 **`fetchFolders`** 去抖与目录区 **`scrollTop`** 恢复；`subscribeGalleryEvent` 注释表）。（*Updated 2026-04-24 — `PROJECT_SPEC` §12.1 v1.1 patch*）**筛选区纵向契约**：**`.mv-filters-pane`** 使用持久化 **`filters_pane_height_px`**（与横向分割拖动手柄一致）；**`.mv-filters-scroll`** 为列 flex、**`.mv-filters-body`** 单独 **`overflow-y: auto`**，其下 **`.mv-filters-slack`**（`flex: 1 1 0`）吸收筛选项下方空白，避免「空白区域仍可滚动」；横向分割的可用高度上界与 **`clampFiltersPaneHeight`** 共享 **`filtersPaneHeightCapPx()`**。Settings **Save preferences** 成功后递增 **`stores/gallerySettings.js`** 的 **`filtersPaneFitRequest`**；`MainView` **`watch`** 其以 **`nextTick` + `requestAnimationFrame`** 调用 **`fitFiltersPaneHeightToContent()`**（`target = min(sidebarCap, userMax, max(minH, natural))`，`userMax` 为当前持久化高度），再 **`persistLayoutDims`** — **一次**收束、不取消用户拖动手柄语义。 |
+| `views/DetailView` | 渲染左图右元数据多区块（*Updated due to runtime implementation / QA feedback*）：缩放、**滚轮**缩放、**←/→** 邻居导航（可编辑区不抢方向键）、元数据分块、**positive** 原文/归一化、内联 **filename**/tag/favorite/重命名（`move`）、Gallery 区**不**放 Version·Sync/侧栏 resync；**显示 `metadata_sync_status` 与"重试同步"按钮**（在 **Operations** 等约定位置）。`GET /image/{id}` 的 **`metadata.positive_prompt_normalized`** 供归一化切换。（*Updated 2026-04-24 — v1.2 对话 QA / 无独立 `TASKS` ID*）**Tags**：行内芯片 + 独立 **Add tag** 行；**Enter 即 PATCH**（无单独 Apply）；**`persistTags`** 串行队列防竞态。**`image.upserted`** 同 id 时用 **`fetchRecord(id, { silent: true })`**，避免 **`record=null`** 致画布闪白。**布局**：**`.dv-body`** `flex` + **`.dv-splitter`** 竖向拖条，右侧宽 **`localStorage` `xyz_gallery.detail_aside_width_px.v1`**（拖动向右为**减** aside 宽，与几何直觉一致）。 |
 | `components/VirtualGrid` | 仅渲染可视视口 ± 2 屏的卡片（NFR-6）。 |
 | `components/ThumbCard` | 缩略图 + 文件名 + 收藏按钮 + 右键菜单 + Bulk checkbox + **同步状态徽标**（`pending` 黄、`failed` 红）。 |
 | `components/Autocomplete` | 前缀触发、debounce、前缀结果 LRU 缓存、键盘导航。 |
-| `components/FolderTree` | 目录树 + 递归切换 + "管理自定义目录"模态入口。 |
+| `components/FolderTree` | 目录树 + 内联 SVG 图式（与 **T40** **`IconButton`** 的 chevron 路径 **同 1.5 stroke / 24 视口** 网格对齐）+ 层级线（`.ft-guide` / `ft-row-inner`）；`hover` / 选中行与主过滤区 `.ac-item` / `.mv-model-item` 同档（0.08 / 0.22 + 左线强调）。（*Updated due to T39 / T40*）`props.showRecursiveButton` 默认 `true`；`MainView` 传 `false` 时不渲染 `ft-toolbar`，由主视图标题行 `ft-recursive` 控制 `filter.recursive`。**不**在节点前展示 `folder.kind` 标签。模态/右键/目录 HTTP 等自 **T33** 起的能力不变。 |
+| `components/IconButton` | 薄封装：内联 **chevron** `<svg>` + **`<a>` 或 `<button>`**；**样式在 `index.html` 的 `.ib` / `.ib--nav` 等 token**（*T40*，对齐 `PROJECT_SPEC` §12.5）。用于 **Detail**（Back、Previous/Next）、**Settings** overlay（Back，动态 `backHref`）、**NotFound**（Home）；**不**改 hash 路由语义。 |
 | `components/BulkBar` | 批量模式下的顶栏；**进度条由"已记录/总数"驱动**（增量提交语义，§4.5）。 |
 | `components/MovePicker` | 目标目录选择 + preflight 结果预览 + 单文件重命名覆盖。 |
 | `components/ConfirmModal` | 所有破坏性操作共用。 |
@@ -647,7 +653,7 @@ tokenize = "unicode61
 
 ### Pre-L4 stabilization（v1.1，体验与数据口径收尾）
 
-> 对应 `PROJECT_SPEC §11`、`gallery_update_description.md`。**不**替换上文 L0–L3，仅描述 **MVP 之后、L4 之前** 的增量束。
+> 对应 `PROJECT_SPEC §11`、`docs/gallery_update_description.md`。**不**替换上文 L0–L3，仅描述 **MVP 之后、L4 之前** 的增量束。
 
 **目标**：在启用 L4（缩略调度、进程池、FTS5）之前，冻结「索引进集」「`prompt_token` 语义」「缩略图/cache 物理位置」「下载导出策略」等口径，避免 T26–T28 建立在错误数据子集或即将废弃的归一化规则上。
 
@@ -669,7 +675,7 @@ tokenize = "unicode61
 2. **`indexer` 元数据解析 ProcessPool（2~4 worker）**。
 3. **FTS5 分词器显式配置 + 触发全量 reindex**（在 prompt/标签搜索体感不佳时启用）。
 4. tag-AND / prompt-AND 自适应查询（`EXISTS` / `INTERSECT`）。
-5. Timeline 布局。
+5. *Updated due to v1.2*：**Line view** 分段布局（`PROJECT_SPEC` §12.2；**不再** 单独称 **Timeline** 为交付名，避免与 v1.0 表内措辞混淆）。
 6. 自定义根目录管理 UI。
 7. `/index/rebuild` 端点。
 8. dedupe 视图。
@@ -685,6 +691,71 @@ L0 骨架
                 └─► Pre-L4 v1.1（索引/词表/UI 收口） ──► **现行默认必须先于 L4**
                          └─► L4 性能与长尾（LIFO/进程池/分词器） ► 解除 defer 后投入
 ```
+
+---
+
+## 7. v1.2 设计增补：Design System、抗闪烁、Progress、视图模式
+
+> 对应 `PROJECT_SPEC §12`。本节**只**增模块职责与数据流，**不** 替代 §4.6 `WriteQueue` 伪代码、§3.1 全链路图之**主干**；凡与 §6「MVP 路径」中 *Timeline* 条冲突时，以 **`PROJECT_SPEC` §12.2** 的 **line view** 定义为准（`ARCHITECTURE` 此处旧词 **“Timeline”** 在 v1.2 视为 **同义于 line view 分段布局** 的产品描述）。
+
+### 7.1 与核心约束的对齐（C-1、Single Writer、ws）
+
+| 主题 | 允许 | 禁止 |
+| --- | --- | --- |
+| 列表数据 | 仍只来自 `repo` → HTTP → `MainView` 中 **单一** `reactive` 图片数组 + 游标 | 在浏览器为 line view 维护第二套「真相」SQLite；绕过 `GET /images` 直接读盘 |
+| 写与进度 | `service` → `repo.enqueue_write` → 事务后 **`ws_hub.broadcast`**（已有 `BULK_*`；可增 **`op.progress`** 字符串常量） | 为进度新建 TCP/HTTP 长轮询旁路、或在 Python 里写第二套 `sqlite3` 连接**仅**为 UI |
+| PNG 与 DB | 与 §4.8 相同：DB 先、PNG 后 | 在 Progress 层「临时」写回用户 PNG |
+
+### 7.2 Design System（放置位置与改法）
+
+* **主样式面**：`js/gallery_dist/index.html` 内**全局** `style` 块（现有 `--xyz-bg`、`--xyz-panel` 等 token 的**扩展**，非推翻）。
+* **组件面**：`DetailView` / `SettingsView` / `MainView` / `components/*` 仅增 **class** 与**布局**；**新** 图标采用 **内联 `<svg role="img">` 复用** 或单独 `js/gallery_dist/components/icons/*` 薄封装（*Updated due to v1.2*：优先 **改 CSS/类名**，**不重写** `VirtualGrid` 虚拟算法）。
+* **设计意图**：**spacing 优于粗边框**；**dark** 下滚动条/表单**轨道** 使用 `color-scheme: dark` + **与主内容同一 token**，杜绝 `#ffffff` 输入/滚动槽（与 `PROJECT_SPEC` §12.5 一致）。
+
+### 7.3 实时性（为何已满足、前端如何「看起来实时」）
+
+* **后端真源链**（**不变**）：`watchdog` → `watcher.Coalescer`（250 ms）→ `indexer` 单/批事件 / **HeartbeatThread 30 s** `delta_scan`（*light* 指纹）→ `repo.WriteQueue`（LOW）→ `ws_hub.broadcast`（`image.upserted` / `image.deleted` / `folder.changed` / `index.drift_detected`）。
+* **前端**（*Updated due to v1.2* 归纳现实现于 `MainView`）：**不** 依赖长轮询列表；`stores/connection` 收到事件后，**能合并则合并**（`mergeRowFromIndexUpsert`），**不能** 则 `scheduleGridRefreshAfterFsUpsert` **防抖** 后 `resetAndFetch()`；`window.onfocus` 对账仍作 **拉取** 兜底。—— **「实时」= 最终一致在 FR-20 窗口内，而非逐帧和本地 NTFS 同步**；网络盘/容器卷**额外** 依赖 `index.drift_detected` + 用户无感对账（已有）。
+
+### 7.4 为何在多数操作下不会「闪」（flicker 根因与对策）
+
+| 根因 | 现实现 / v1.2 方向 | 与 `listGen` 关系 |
+| --- | --- | --- |
+| 全量重拉**清空** `images` | `resetAndFetch` 仍**首行**设 `images=[]`（*必然**闪**一帧*）；**对策**：减少**无必要** 调用 + 能 patch 的 patch；OS **新增** id 才走防抖全量 | `gridListGen` 在**全量**时 `+=1` → `VirtualGrid` 仅此时滚回顶 |
+| 行级元数据 | `image.updated` + 同 id → **splice/assign** 字段 | **不** 增 `listGen`（见 `MainView` 注释 *Only increments on full first-page list replace*） |
+| 批量结束 | 今日 `resetAndFetch` 在部分路径触发 | v1.2 与 **Progress 浮层** 合流：若列表与 filter **未变**，评估 **只** `loadMore` 对账 或**定向** 拉 id（*TASKS 可选项*） |
+| 目录抖动 | `folder.changed` 往往伴 `resetAndFetch` | **v1.2 收敛**（见 `TASKS` **T43** ✅）：**先** 静默 **`fetchFolders`**（短去抖 + **`scrollTop`** 恢复）；**仅当** 事件 **`root_id`** 与当前 **`folder_id` 所属根**一致（**`rootIdContainingFolderId`**）才 **`resetAndFetch`**，否则**仅**树更新。**必须** 与 **Progress**（**T44**）同事务感知 |
+
+> **实现指导（给未来 AI / 人）**：改闪烁问题**优先**在 **`MainView` 事件分发** 与 **Fetch 门控** 上动手；**不** 先重写 `VirtualGrid`；若新增 **line view wrapper**，**复用** 同一 `items` 源与 `load-more` 协议。（*Updated due to T43 / QA 2026-04-24*：`MainView.js` 内 **T43 / §12.3** 注释表与上表一致。）
+
+### 7.5 Progress 数据流（统一模态，融合既有 WS）
+
+* **现况**：`service.execute_move` / bulk delete 等在每步后 `ws_hub.broadcast('bulk.progress', { done, total, plan_id, … })`；`BulkBar` 内联进度条**订阅** `BULK_PROGRESS` / `BULK_COMPLETED`（`ws_hub` 常量见 `ws_hub.py`）。**`indexer`** 路径上已有 **`index.progress`**（`INDEX_PROGRESS`）。**metadata_sync** 对 `notify()` 在单 tick 内合并 `_pending`，但 **bulk favorite/tags** 与 **tag_admin_*** 仍可能在服务层对**大量** id **逐条** `notify`，放大 worker 与 WS 扇出压力 — **T44** 交付时按 `PROJECT_SPEC` §12.4 增补审计**合并唤醒**或等价手段。
+
+* **v1.2 / T44 目标 — 长任务统一 Job 模型**（对齐 `PROJECT_SPEC` §12.4 **FR-Prog-4**）：
+  1. **逻辑 Job**：所有用户可见长作业映射到同一 **`job_id`**（实现**可**将现有 `bulk_id`、`plan_id` 或 `index` 会话 id **直接**作 `job_id` 暴露给前端，**或**引入别名字段 `job_id` 与旧字段并存一轮迁移 — 以 `TASKS` 为准）。
+  2. **事件源归一**：`ProgressModal` **唯一**从 **`subscribeGalleryEvent`**（或薄封装）消费 **`bulk.progress` / `bulk.completed`**、**`index.progress`**、以及实现阶段新增的 **`job.progress` / `job.completed`**（名称以 `ws_hub` 常量与 `PROJECT_SPEC` §7.9 表为准）；`data` 形状**同一 envelope**（`kind`、`phase?`、`done`、`total?`、`message?`），避免每种操作一套 UI 状态机。
+  3. **晚到 Web 会话**（**FR-Prog-5**）：Gallery SPA **bootstrap**（或 WS `open` 后**首条**服务端消息）须能拿到 **当前活跃 Job**；推荐 **`GET .../jobs/active`**（只读、O(1) 查活跃表/进程内 registry）→ 若非空则**立即**挂载 `ProgressModal` 并冻结主网格，与「本 Tab 发起」同交互；WS 重连后同样**先**拉快照再订阅，避免漏进度。
+  4. 抽出 **`components/ProgressModal`（或 `composables/progressModal`）** —— 上述事件的**单一**订阅点（可挂在 `app.js` 或 `MainView` 根）。
+  5. **Settings / indexer** 等多阶段例程在 **不** 改变 `WriteQueue` 事务边界前提下，于**阶段边界** `broadcast`；完成 → **定时** 关闭 + 通知 `MainView` **弱** 刷新（见 7.4 表：避免双闪）。
+  6. **可见性阈值**（**FR-Prog-6**）：模态**非**仅按「≥3 张」；**时间主导**（如 >300–500 ms 仍无完成）+ **规模**下限由 `TASKS` 常量化；极短批量保留 `BulkBar` 内联或静默路径。
+
+* **批量 I/O 与 PNG 镜像（与 T43 一致，*Updated 2026-04-25 — T44*）**：**纯路径** bulk move 已 **`UpdateImagePathOp(refresh_sync=False)`** 且**不**逐图 `metadata_sync.notify`。**`RelocateFolderSubtreeDbOp`（`PROJECT_SPEC` §12.4 v1.1 override）** 在单事务内批量改 `image.path` 时**不**将行级 **`metadata_sync_*` 标为 `pending`**（**不**触发「仅换路径」的整文件 PNG 回写；与 **T24** 纯重定位一致）；**仍** **不得** 在子树重定位中逐图 `read_comfy_metadata` 入队。服务层 **`folder_move` / `folder_rename`** 在 **Relocate + Reconcile** 后**不** 再追**全根** `folder_schedule_rescan` 与 **T44** 收口及 watcher/增量对账 合流。**`watcher.register_moved_subtree_bypass`** 在短 TTL 内对**预计算**旧/新**精确**路径集上的监视器 **`d`/`u`** 旁路冗余索引。**`bulk_set_favorite` / `bulk_edit_tags` / `tag_admin_*`** 的逐条 `notify` 等仍为 **`PROJECT_SPEC` / `TASKS` T44 §D** 可续审计项（不阻塞 T44 结案；见上条 *现况* bullet）。
+
+* **不** 允许：Progress 在轮询中读**未提交** 的中间表；用户可见的「%」必须以 **已提交到 SQLite** 的步进或**已**执行物理 op 为基准（与 §4.5 增量提交**叙事**一致）。
+
+### 7.6 视图模式（compact / line）的数据与渲染
+
+* **State**：`filters` 或 `gallerySettings` 增加 **`view_mode: 'compact' | 'line'`**（*defaults + localStorage*，与 T36 首选项 **合并键空间** 由 `TASKS` 定，避免**双源** preference）。
+* **数据**：**同一** `images` 数组、**同一** `next_cursor` / `hasMore`；**不** 为 line 重造 `/images` 协议（除非测得性能不足再 **P2 单独立项** 服务端分组）。
+* **line 布局**（*Updated 2026-04-25 — T45*）：`MainView` 在 `view_mode=line` 时渲染 **`LineVirtualGrid`**（`js/gallery_dist/components/LineVirtualGrid.js`），与 compact 共用 **同一** `images` / 游标；**section 键与标签** 由 **`sectionKeys.js`**（**`partitionItemsForLineView`** 等）按 **`PROJECT_SPEC` §12.2** 表派生。**folder** 分桶的 **非递归** 规则**严格**按 `relative_path` 与「父目录=section」解析；**同 key** 多段在客户端 **按首次出现顺序合并**（与 **`list_images`** 在 **T45** 后的 folder 排序一致），**不** 在追加页后单独 **`localeCompare`** 重排 section。每节 **header** + **内嵌** `ThumbCard` 行；**load-more** 仍由**底部 sentinel** 触发。
+* **筛选区**（*Updated 2026-04-25 — T45 同轮 QA*）：**name / prompt / tag** 筛选：**标签文案** 独占一行，**输入框（或 `Autocomplete`）与红色清除 ×** 在 **`index.html` `.mv-field-inputrow`** 同一行（见 **`MainView`** 模板）。
+
+### 7.7 Anti-patterns（v1.2 增补）
+
+* **禁止** 在 **Detail** 用 **无 token** 的 raw `<input>` 默认样式，而 Main 已用 **gallery** 的样式类。
+* **禁止** 在 bulk **以外** 复制一套 **自管** 进度 `setInterval` **与** 后端 **脱钩** 的假进度条。
+* **禁止** 为 `line view` 再拉一条 **平行的** `/images/sections` 除非 SPEC 与 **repo API** 已**显式** 增加并同步 `TASKS`。
 
 ---
 

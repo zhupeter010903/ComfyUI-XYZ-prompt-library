@@ -32,6 +32,8 @@ from typing import Any, Optional, Tuple
 from PIL import Image, UnidentifiedImageError
 from PIL.PngImagePlugin import PngInfo
 
+from . import paths as _paths
+
 
 _KEY_PROMPT = "prompt"          # ComfyUI: API workflow JSON (executable form)
 _KEY_WORKFLOW = "workflow"      # ComfyUI: UI graph JSON (download target)
@@ -400,6 +402,8 @@ def write_xyz_chunks(
     path: Any,
     tags: Optional[str],
     favorite: Optional[int],
+    *,
+    atomic_staging_dir: Optional[Any] = None,
 ) -> None:
     """Write gallery mirror chunks to a PNG; preserve all other tEXt / iTXt.
 
@@ -414,6 +418,15 @@ def write_xyz_chunks(
     ``favorite`` is ``0`` / ``1`` / ``None`` (omit chunk). This stays aligned
     with indexer normalisation (PROJECT_STATE §4 #24).
 
+    ``atomic_staging_dir`` (optional): when set (e.g. under ``gallery_data/``),
+    temp files are tried there first so clutter stays out of library trees when
+    :func:`os.replace` can reach the target (same volume). When that fails
+    (e.g. gallery DB on ``C:`` but images on ``D:``), the writer uses a hidden
+    sibling directory ``<parent-of-target>/.xyz_gallery_atomic/`` — still the
+    same volume as the PNG so replace succeeds; temps do **not** land next to
+    real images in the visible folder. Only if both fail does it fall back to
+    ``mkstemp`` directly in the target's parent (legacy).
+
     Raises:
         FileNotFoundError: path does not exist.
         ValueError: not a PNG or Pillow cannot decode the image.
@@ -423,54 +436,94 @@ def write_xyz_chunks(
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(str(p))
-    tmp_fd: Optional[int] = None
-    tmp_path: Optional[Path] = None
+
+    staging_parents: list[Path] = []
+    seen_norm: set[str] = set()
+
+    def _add_staging_parent(candidate: Path) -> None:
+        try:
+            key = str(candidate.resolve(strict=False))
+        except OSError:
+            key = str(candidate)
+        if key in seen_norm:
+            return
+        seen_norm.add(key)
+        staging_parents.append(candidate)
+
+    if atomic_staging_dir is not None:
+        sd = Path(atomic_staging_dir)
+        try:
+            sd.mkdir(parents=True, exist_ok=True)
+            _add_staging_parent(sd)
+        except OSError:
+            pass
     try:
-        with Image.open(p) as img:
-            img.load()
-            if (img.format or "").upper() != "PNG":
-                raise ValueError(f"not a PNG: format={img.format!r}")
-            text = dict(getattr(img, "text", {}) or {})
-            pnginfo = PngInfo()
-            for key, value in text.items():
-                sk = str(key)
-                if sk.startswith("xyz_gallery."):
-                    continue
-                pnginfo.add_text(sk, str(value), zip=False)
-            if tags is not None:
-                pnginfo.add_text(_KEY_XYZ_TAGS, str(tags), zip=False)
-            if favorite is not None:
-                fav_s = "1" if int(favorite) else "0"
-                pnginfo.add_text(_KEY_XYZ_FAVORITE, fav_s, zip=False)
-            parent = p.parent
-            parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_name = tempfile.mkstemp(
-                suffix=".png",
-                prefix=GALLERY_ATOMIC_TMP_PREFIX,
-                dir=str(parent),
-            )
-            tmp_path = Path(tmp_name)
-            os.close(tmp_fd)
-            tmp_fd = None
-            img.save(
-                tmp_path,
-                format="PNG",
-                pnginfo=pnginfo,
-                compress_level=6,
-            )
-        os.replace(tmp_path, p)
-        tmp_path = None
-    finally:
-        if tmp_fd is not None:
-            try:
+        local_staging = p.parent / _paths.XYZ_GALLERY_ATOMIC_DIRNAME
+        local_staging.mkdir(parents=True, exist_ok=True)
+        _add_staging_parent(local_staging)
+    except OSError:
+        pass
+    _add_staging_parent(p.parent)
+
+    last_os_err: Optional[OSError] = None
+    for parent in staging_parents:
+        tmp_fd: Optional[int] = None
+        tmp_path: Optional[Path] = None
+        try:
+            with Image.open(p) as img:
+                img.load()
+                if (img.format or "").upper() != "PNG":
+                    raise ValueError(f"not a PNG: format={img.format!r}")
+                text = dict(getattr(img, "text", {}) or {})
+                pnginfo = PngInfo()
+                for key, value in text.items():
+                    sk = str(key)
+                    if sk.startswith("xyz_gallery."):
+                        continue
+                    pnginfo.add_text(sk, str(value), zip=False)
+                if tags is not None:
+                    pnginfo.add_text(_KEY_XYZ_TAGS, str(tags), zip=False)
+                if favorite is not None:
+                    fav_s = "1" if int(favorite) else "0"
+                    pnginfo.add_text(_KEY_XYZ_FAVORITE, fav_s, zip=False)
+                try:
+                    parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                tmp_fd, tmp_name = tempfile.mkstemp(
+                    suffix=".png",
+                    prefix=GALLERY_ATOMIC_TMP_PREFIX,
+                    dir=str(parent),
+                )
+                tmp_path = Path(tmp_name)
                 os.close(tmp_fd)
-            except OSError:
-                pass
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+                tmp_fd = None
+                img.save(
+                    tmp_path,
+                    format="PNG",
+                    pnginfo=pnginfo,
+                    compress_level=6,
+                )
+            os.replace(str(tmp_path), str(p))
+            tmp_path = None
+            return
+        except OSError as exc:
+            last_os_err = exc
+        finally:
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    if last_os_err is not None:
+        raise last_os_err
+    raise OSError(f"write_xyz_chunks: atomic replace failed for {p!r}")
 
 
 def read_workflow_chunk(path) -> Optional[str]:

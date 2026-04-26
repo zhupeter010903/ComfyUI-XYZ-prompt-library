@@ -45,6 +45,7 @@ import { apiQueryObject, filterState } from '../stores/filters.js';
 import { BASE_URL } from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
 import { ConfirmModal } from '../components/ConfirmModal.js';
+import { IconButton } from '../components/IconButton.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 import { vocabCacheClear } from '../stores/vocab.js';
 import { vocabAutocompleteMatch, developerMode } from '../stores/gallerySettings.js';
@@ -54,6 +55,11 @@ const MAX_SCALE = 20;
 const ZOOM_STEP = 1.25;
 /** Slightly gentler than toolbar +/- so trackpad + mouse wheel feel usable. */
 const WHEEL_ZOOM_STEP = 1.12;
+
+const DETAIL_ASIDE_LS = 'xyz_gallery.detail_aside_width_px.v1';
+const DETAIL_ASIDE_DEFAULT = 360;
+const DETAIL_ASIDE_MIN = 260;
+const DETAIL_ASIDE_MAX_ABS = 560;
 
 function fmtBytesDv(n) {
   const x = Number(n) || 0;
@@ -65,7 +71,7 @@ function fmtBytesDv(n) {
 
 export const DetailView = defineComponent({
   name: 'DetailView',
-  components: { Autocomplete, ConfirmModal },
+  components: { Autocomplete, ConfirmModal, IconButton },
   props: { id: { type: Number, required: true } },
   setup(props) {
     const loading = ref(true);
@@ -89,7 +95,10 @@ export const DetailView = defineComponent({
 
     const tagDraft = ref(/** @type {string[]} */([]));
     const tagInput = ref('');
+    /** True while a tag PATCH is in flight (UI disable + serial queue). */
     const gallerySaving = ref(false);
+    /** Serialize tag PATCHes so rapid add/remove never races. */
+    let tagPersistTail = Promise.resolve();
     const favSaving = ref(false);
     const delModal = ref(false);
     const delBusy = ref(false);
@@ -121,22 +130,76 @@ export const DetailView = defineComponent({
       tagInput.value = '';
     }
 
-    async function fetchRecord(id) {
-      loading.value = true;
-      error.value = null;
-      record.value = null;
+    function _readAsideWidthPx() {
       try {
-        record.value = await api.get(`/image/${id}`);
+        const n = parseInt(localStorage.getItem(DETAIL_ASIDE_LS) || '', 10);
+        if (!Number.isFinite(n)) return DETAIL_ASIDE_DEFAULT;
+        return Math.min(DETAIL_ASIDE_MAX_ABS, Math.max(DETAIL_ASIDE_MIN, n));
+      } catch {
+        return DETAIL_ASIDE_DEFAULT;
+      }
+    }
+    function _clampAsideWidth(w) {
+      const maxW = Math.min(
+        DETAIL_ASIDE_MAX_ABS,
+        Math.max(DETAIL_ASIDE_MIN + 40, Math.floor(window.innerWidth * 0.55)),
+      );
+      return Math.max(DETAIL_ASIDE_MIN, Math.min(maxW, Math.round(w)));
+    }
+    const asideWidthPx = ref(_readAsideWidthPx());
+
+    let splitDrag = false;
+    let splitStartX = 0;
+    let splitStartW = 0;
+    function onAsideSplitMove(e) {
+      if (!splitDrag) return;
+      /* Dragging the handle right narrows the metadata column (moves split into aside). */
+      asideWidthPx.value = _clampAsideWidth(
+        splitStartW - (e.clientX - splitStartX),
+      );
+    }
+    function onAsideSplitUp() {
+      if (!splitDrag) return;
+      splitDrag = false;
+      window.removeEventListener('mousemove', onAsideSplitMove, true);
+      window.removeEventListener('mouseup', onAsideSplitUp, true);
+      try {
+        localStorage.setItem(DETAIL_ASIDE_LS, String(asideWidthPx.value));
+      } catch { /* ignore */ }
+      nextTick(() => _measureCanvas());
+    }
+    function onAsideSplitDown(e) {
+      splitDrag = true;
+      splitStartX = e.clientX;
+      splitStartW = asideWidthPx.value;
+      window.addEventListener('mousemove', onAsideSplitMove, true);
+      window.addEventListener('mouseup', onAsideSplitUp, true);
+    }
+
+    async function fetchRecord(id, opts = {}) {
+      const silent = !!(opts && opts.silent);
+      if (!silent) {
+        loading.value = true;
+        error.value = null;
+        record.value = null;
+      }
+      try {
+        const next = await api.get(`/image/${id}`);
+        if (Number(next.id) !== Number(id)) return;
+        record.value = next;
         syncTagDraft();
       } catch (exc) {
-        error.value = exc;
+        if (!silent) {
+          error.value = exc;
+          record.value = null;
+        }
       } finally {
-        loading.value = false;
+        if (!silent) loading.value = false;
       }
     }
 
     function onTagInput(v) { tagInput.value = v; }
-    function commitNewTag() {
+    async function commitNewTag() {
       const s = String(tagInput.value || '').split(',').map((x) => x.trim())
         .filter(Boolean);
       if (!s.length) return;
@@ -150,26 +213,38 @@ export const DetailView = defineComponent({
       }
       tagDraft.value = out;
       tagInput.value = '';
+      await persistTags();
     }
-    function removeTag(idx) {
+    async function removeTag(idx) {
       if (idx < 0 || idx >= tagDraft.value.length) return;
       tagDraft.value = tagDraft.value.filter((_, i) => i !== idx);
+      await persistTags();
     }
 
-    async function applyTags() {
-      if (gallerySaving.value) return;
+    async function persistTags() {
+      const prevWait = tagPersistTail;
+      let resolveNext = () => {};
+      tagPersistTail = new Promise((r) => { resolveNext = r; });
+      await prevWait;
       const id = props.id;
       gallerySaving.value = true;
       const prev = record.value;
       try {
         const out = await api.patch(`/image/${id}`, { tags: tagDraft.value.slice() });
+        if (!out || Number(out.id) !== Number(id) || Number(out.id) !== Number(props.id)) {
+          return;
+        }
         record.value = out;
         syncTagDraft();
         vocabCacheClear();
       } catch (e) {
-        if (prev) { record.value = prev; syncTagDraft(); }
+        if (prev && Number(prev.id) === Number(props.id)) {
+          record.value = prev;
+          syncTagDraft();
+        }
       } finally {
         gallerySaving.value = false;
+        resolveNext();
       }
     }
 
@@ -519,7 +594,9 @@ export const DetailView = defineComponent({
           return;
         }
         if (t === EV.UPSERTED) {
-          fetchRecord(props.id);
+          // Silent refresh: full fetch would set record=null and flash the canvas
+          // (e.g. metadata_sync wrote PNG chunks → watcher upsert).
+          void fetchRecord(props.id, { silent: true });
           return;
         }
         if (t === EV.UPDATED) {
@@ -544,6 +621,8 @@ export const DetailView = defineComponent({
 
     onBeforeUnmount(() => {
       window.removeEventListener('keydown', onDetailKeydown);
+      window.removeEventListener('mousemove', onAsideSplitMove, true);
+      window.removeEventListener('mouseup', onAsideSplitUp, true);
       if (unsubEvent) { unsubEvent(); unsubEvent = null; }
       if (unsubRecon) { unsubRecon(); unsubRecon = null; }
       if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
@@ -661,12 +740,13 @@ export const DetailView = defineComponent({
       posView, displayPositive,
       prevId, nextId, neighborsLoading,
       scale, tx, ty, scalePct,
+      asideWidthPx, onAsideSplitDown,
       canvasRef, imgStyle, copiedKey,
       hasWorkflow, workflowUrl, dlImageBusy, onDownloadImage,
       vocabAutocompleteMatch,
       developerMode,
       syncStatusBadge,
-      tagDraft, tagInput, onTagInput, commitNewTag, removeTag, applyTags,
+      tagDraft, tagInput, onTagInput, commitNewTag, removeTag,
       gallerySaving, toggleFavorite, favSaving,
       onImgLoad,
       onPointerDown, onPointerMove, onPointerUp,
@@ -684,7 +764,7 @@ export const DetailView = defineComponent({
   template: `
     <section class="dv">
       <header class="dv-head">
-        <a href="#/" class="dv-back">&larr; Back</a>
+        <IconButton href="#/" class="ib" text="Back" title="Back to grid" />
         <h2 class="dv-title">
           <span v-if="record" class="dv-title-row">
             <span v-if="syncStatusBadge"
@@ -700,16 +780,20 @@ export const DetailView = defineComponent({
           </span>
         </h2>
         <nav class="dv-nav">
-          <button type="button"
-                  class="dv-nav-btn"
-                  @click="gotoPrev"
-                  :disabled="neighborsLoading || !record"
-                  title="Previous (wraps) — ←">&larr; Previous</button>
-          <button type="button"
-                  class="dv-nav-btn"
-                  @click="gotoNext"
-                  :disabled="neighborsLoading || !record"
-                  title="Next (wraps) — →">Next &rarr;</button>
+          <IconButton
+            class="ib ib--nav"
+            icon="chevronLeft"
+            text="Previous"
+            title="Previous (wraps)"
+            :disabled="neighborsLoading || !record"
+            @click="gotoPrev" />
+          <IconButton
+            class="ib ib--nav"
+            icon="chevronRight"
+            text="Next"
+            title="Next (wraps)"
+            :disabled="neighborsLoading || !record"
+            @click="gotoNext" />
         </nav>
       </header>
 
@@ -743,8 +827,12 @@ export const DetailView = defineComponent({
             <span class="dv-zoom-pct muted">{{ scalePct }}%</span>
           </div>
         </div>
-
-        <aside class="dv-right">
+        <div class="dv-splitter"
+             role="separator"
+             aria-orientation="vertical"
+             title="Drag to resize image vs details"
+             @mousedown.prevent="onAsideSplitDown"></div>
+        <aside class="dv-right" :style="{ flex: '0 0 ' + asideWidthPx + 'px', width: asideWidthPx + 'px' }">
           <template v-if="record">
             <section class="dv-sec-block" aria-label="image data">
               <h3 class="dv-sec">Image data</h3>
@@ -809,27 +897,31 @@ export const DetailView = defineComponent({
                   </button>
                 </dd>
                 <dt>Tags</dt>
-                <dd class="dv-tags-oneline">
-                  <ul v-if="tagDraft && tagDraft.length" class="dv-tags dv-tags--inline">
-                    <li v-for="(t, i) in tagDraft" :key="i" class="dv-tag">
-                      <code>{{ t }}</code>
-                      <button type="button" class="dv-tag-x" @click="removeTag(i)" :aria-label="'remove '+t">×</button>
-                    </li>
-                  </ul>
-                  <span v-else class="dv-tags-empty muted" role="status">(none)</span>
-                  <Autocomplete class="dv-tagac dv-tagac--inline"
-                                fetch-kind="tags"
-                                :vocab-match-mode="vocabAutocompleteMatch"
-                                placeholder="Add tag, Enter"
-                                :model-value="tagInput"
-                                @update:model-value="onTagInput"
-                                @commit="commitNewTag" />
-                  <button type="button"
-                          class="dv-apply"
-                          :disabled="gallerySaving"
-                          @click="applyTags">
-                    {{ gallerySaving ? 'Saving…' : 'Apply tags' }}
-                  </button>
+                <dd class="dv-tags-block">
+                  <div class="dv-tags-row">
+                    <ul v-if="tagDraft && tagDraft.length" class="dv-tags dv-tags--chips">
+                      <li v-for="(t, i) in tagDraft" :key="'tag-'+i+'-'+t" class="dv-tag">
+                        <code>{{ t }}</code>
+                        <button type="button"
+                                class="dv-tag-x"
+                                :disabled="gallerySaving"
+                                @click="removeTag(i)"
+                                :aria-label="'remove '+t">×</button>
+                      </li>
+                    </ul>
+                    <span v-else class="dv-tags-empty muted" role="status">(none)</span>
+                  </div>
+                  <div class="dv-add-tag-row">
+                    <span class="dv-add-tag-label">Add tag:</span>
+                    <Autocomplete class="dv-tagac dv-tagac--detail"
+                                  fetch-kind="tags"
+                                  :vocab-match-mode="vocabAutocompleteMatch"
+                                  :disabled="gallerySaving"
+                                  placeholder="Type and press Enter"
+                                  :model-value="tagInput"
+                                  @update:model-value="onTagInput"
+                                  @commit="commitNewTag" />
+                  </div>
                 </dd>
               </dl>
             </section>

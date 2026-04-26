@@ -18,7 +18,7 @@
 //   * Bulk selection / checkbox overlay (T23).
 //   * Real favorite PATCH (T19); we keep an optimistic local flip and
 //     emit intent that T19 will convert into an api.patch(/image/:id).
-//   * Timeline (FR-9c).
+//   * Line view (FR-9c / T45) — ``LineVirtualGrid`` + ``filterState.view_mode``.
 //   * T21: Autocomplete for prompt/tag filters + /vocab/models for model list.
 //   * T22: api.patch + WS (stores/connection.js) + /index/status focus
 //     reconciliation.
@@ -26,8 +26,10 @@ import { defineComponent, ref, computed, watch, onMounted, onBeforeUnmount, next
 import * as api from '../api.js';
 import { executeImageDownload } from '../stores/downloadHelper.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
+import { progressMainFrozen, setIndexJobUiSyncHandler } from '../stores/galleryProgress.js';
 import { FolderTree } from '../components/FolderTree.js';
 import { VirtualGrid } from '../components/VirtualGrid.js';
+import { LineVirtualGrid } from '../components/LineVirtualGrid.js';
 import { BulkBar } from '../components/BulkBar.js';
 import { MovePicker } from '../components/MovePicker.js';
 import { ConfirmModal } from '../components/ConfirmModal.js';
@@ -37,6 +39,7 @@ import {
   filterState, panelCollapsed, setPanelCollapsed,
   apiQueryObject, resetFilter,
   layoutState, setCardsPerRow,
+  setViewMode,
 } from '../stores/filters.js';
 import { toggleCardInSelection, resetSelection } from '../stores/selection.js';
 import { vocabCacheClear } from '../stores/vocab.js';
@@ -48,9 +51,40 @@ import {
   vocabAutocompleteMatch,
   filterVisibility,
   developerMode,
+  filtersPaneFitRequest,
 } from '../stores/gallerySettings.js';
 
 const PAGE_SIZE = 120;
+
+/**
+ * T43 — registered root id that owns `folderId` in the current `/folders` tree
+ * (top-level node id). Used to skip gratuitous `resetAndFetch` on `folder.changed`
+ * from another root (NFR-20 / SPEC §12.3).
+ *
+ * @param {unknown} nodes
+ * @param {number} folderId
+ * @returns {number|null}
+ */
+function rootIdContainingFolderId(nodes, folderId) {
+  if (typeof folderId !== 'number' || !Array.isArray(nodes)) return null;
+  function contains(n, fid) {
+    if (!n || typeof n !== 'object') return false;
+    if (n.id === fid) return true;
+    const ch = n.children;
+    if (!Array.isArray(ch)) return false;
+    for (let i = 0; i < ch.length; i += 1) {
+      if (contains(ch[i], fid)) return true;
+    }
+    return false;
+  }
+  for (let i = 0; i < nodes.length; i += 1) {
+    const root = nodes[i];
+    if (contains(root, folderId)) {
+      return typeof root.id === 'number' ? root.id : null;
+    }
+  }
+  return null;
+}
 
 function readLayoutNum(key, fallback) {
   try {
@@ -94,7 +128,7 @@ function _readPendingRestore() {
 export const MainView = defineComponent({
   name: 'MainView',
   components: {
-    FolderTree, VirtualGrid, BulkBar, MovePicker, ConfirmModal,
+    FolderTree, VirtualGrid, LineVirtualGrid, BulkBar, MovePicker, ConfirmModal,
     Autocomplete, ModelFilterPick,
   },
   setup() {
@@ -197,6 +231,8 @@ export const MainView = defineComponent({
           overflow: 'visible',
         };
       }
+      // Fixed height so the filter↔folder splitter always reserves space; extra
+      // room below short filter content is non-scrollable slack (see .mv-filters-slack).
       return {
         flex: '0 0 auto',
         height: `${Math.round(filtersPaneHeightPx.value)}px`,
@@ -207,17 +243,57 @@ export const MainView = defineComponent({
       };
     });
 
-    function clampFiltersPaneHeight() {
-      if (panelCollapsed.filters) return;
+    /** Sidebar cap for filter pane height (same rule as horizontal splitter). */
+    function filtersPaneHeightCapPx() {
       const aside = sidebarStackEl.value;
-      if (!aside) return;
+      if (!aside) return 800;
       const h = aside.clientHeight;
       const reserved = 200;
-      const maxH = Math.max(140, h - reserved);
+      return Math.max(140, h - reserved);
+    }
+
+    function clampFiltersPaneHeight() {
+      if (panelCollapsed.filters) return;
+      const maxH = filtersPaneHeightCapPx();
       const minH = 120;
       if (filtersPaneHeightPx.value > maxH) filtersPaneHeightPx.value = maxH;
       if (filtersPaneHeightPx.value < minH) filtersPaneHeightPx.value = minH;
     }
+
+    /**
+     * After Settings → Save: shrink/grow filter pane to visible fields, capped by
+     * sidebar layout max and by the user's current height (drag handle ceiling).
+     */
+    function fitFiltersPaneHeightToContent() {
+      if (panelCollapsed.filters) return;
+      const aside = sidebarStackEl.value;
+      if (!aside) return;
+      const head = aside.querySelector('.mv-filters-pane .mv-sec-head');
+      const body = aside.querySelector('.mv-filters-pane .mv-filters-body');
+      if (!head || !body) return;
+      const cap = filtersPaneHeightCapPx();
+      const minH = 120;
+      const userMax = Math.max(minH, Math.round(filtersPaneHeightPx.value));
+      const fudge = 8;
+      const natural = Math.ceil(head.offsetHeight + body.scrollHeight + fudge);
+      const target = Math.min(cap, userMax, Math.max(minH, natural));
+      filtersPaneHeightPx.value = target;
+      persistLayoutDims();
+    }
+
+    watch(
+      filtersPaneFitRequest,
+      (n) => {
+        if (n < 1) return;
+        nextTick(() => {
+          requestAnimationFrame(() => {
+            fitFiltersPaneHeightToContent();
+            filtersPaneFitRequest.value = 0;
+          });
+        });
+      },
+      { immediate: true },
+    );
 
     let splitVActive = false;
     let splitVStartX = 0;
@@ -265,8 +341,7 @@ export const MainView = defineComponent({
       nh = Math.max(120, nh);
       const aside = sidebarStackEl.value;
       if (aside) {
-        const cap = aside.clientHeight - 200;
-        nh = Math.min(nh, Math.max(140, cap));
+        nh = Math.min(nh, filtersPaneHeightCapPx());
       }
       filtersPaneHeightPx.value = nh;
     }
@@ -281,19 +356,41 @@ export const MainView = defineComponent({
     }
 
     let sidebarResizeObs = null;
+    /** Coalesce burst ``GET /folders`` (WS / bulk) so FolderTree DOM is not repainted dozens of times per second. */
+    let foldersSilentDebounceTimer = null;
 
     async function fetchFolders(opts = {}) {
       const silent = !!opts.silent;
-      let prevScroll = null;
-      if (silent && folderTreeScrollEl.value) {
-        prevScroll = folderTreeScrollEl.value.scrollTop;
+      if (silent) {
+        return new Promise((resolve) => {
+          if (foldersSilentDebounceTimer) clearTimeout(foldersSilentDebounceTimer);
+          foldersSilentDebounceTimer = setTimeout(async () => {
+            foldersSilentDebounceTimer = null;
+            try {
+              await fetchFoldersBody({ silent: true });
+            } finally {
+              resolve();
+            }
+          }, 100);
+        });
       }
+      await fetchFoldersBody(opts);
+    }
+
+    async function fetchFoldersBody(opts = {}) {
+      const silent = !!opts.silent;
       if (!silent) {
         foldersLoading.value = true;
       }
       foldersError.value = null;
+      let scrollBeforeTreeAssign = null;
       try {
         const resp = await api.get('/folders', { query: { include_counts: 'true' } });
+        // Snapshot scroll **after** network wait, immediately before replacing ``folders``
+        // (capturing at request start fights user scroll during await → scrollbar "snaps back").
+        if (silent && folderTreeScrollEl.value) {
+          scrollBeforeTreeAssign = folderTreeScrollEl.value.scrollTop;
+        }
         folders.value = Array.isArray(resp) ? resp : [];
       } catch (e) {
         if (!silent) {
@@ -303,11 +400,11 @@ export const MainView = defineComponent({
         if (!silent) {
           foldersLoading.value = false;
         }
-        if (prevScroll != null) {
+        if (scrollBeforeTreeAssign != null) {
           await nextTick();
           requestAnimationFrame(() => {
             const el = folderTreeScrollEl.value;
-            if (el) el.scrollTop = prevScroll;
+            if (el) el.scrollTop = scrollBeforeTreeAssign;
           });
         }
       }
@@ -468,8 +565,46 @@ export const MainView = defineComponent({
         }
       });
 
-      unsubRecon = subscribeReconcile(() => { resetAndFetch(); });
+      unsubRecon = subscribeReconcile(() => {
+        if (progressMainFrozen.value) {
+          return;
+        }
+        resetAndFetch();
+      });
+      // --- T43 / SPEC §12.3 / NFR-20 — `subscribeGalleryEvent` list vs tree policy ---
+      //  type                      | images[] / grid        | GET /folders
+      //  -------------------------|------------------------|------------------
+      //  index.drift_detected      | FULL (resetAndFetch)   | silent refresh
+      //  folder.changed            | FULL only if needed * | silent refresh
+      //  bulk.completed            | FULL                   | silent refresh
+      //  image.upserted            | MERGE or debounced FULL| silent refresh
+      //  image.deleted             | row splice + count     | silent refresh
+      //  image.updated             | PATCH; FULL if moved_to | silent if moved
+      //  image.sync_status_changed | PATCH sync fields      | —
+      //  index.progress            | ignored                | —
+      //  * folder.changed: `ReconcileFoldersUnderRootOp` only mutates `folder` rows.
+      //    Skip FULL when no folder filter, or when `data.root_id` is not the root
+      //    that owns the current `folder_id` (tree-only update for other roots).
+      //  subscribeReconcile (focus): FULL — server `last_event_ts` ahead of client.
+      function onResumeAfterProgressModal() {
+        void fetchFolders({ silent: true });
+        void resetAndFetch();
+      }
+      window.addEventListener('xyz-gallery-resume-after-modal', onResumeAfterProgressModal);
+
+      setIndexJobUiSyncHandler(async () => {
+        await Promise.all([
+          fetchFolders({ silent: true }),
+          resetAndFetch(),
+        ]);
+        await nextTick();
+        await nextTick();
+      });
+
       unsubEvent = subscribeGalleryEvent((env) => {
+        if (progressMainFrozen.value) {
+          return;
+        }
         const t = env && env.type;
         const d = (env && env.data) || {};
         if (t === EV.DRIFT) {
@@ -479,6 +614,17 @@ export const MainView = defineComponent({
         }
         if (t === EV.FOLDER_CHANGED) {
           void fetchFolders({ silent: true });
+          const rid = typeof d.root_id === 'number' ? d.root_id : Number(d.root_id);
+          const fid = filterState.filter.folder_id;
+          if (fid == null) {
+            return;
+          }
+          if (Number.isFinite(rid)) {
+            const selRoot = rootIdContainingFolderId(folders.value, fid);
+            if (selRoot != null && selRoot !== rid) {
+              return;
+            }
+          }
           resetAndFetch();
           return;
         }
@@ -539,6 +685,10 @@ export const MainView = defineComponent({
     });
 
     onBeforeUnmount(() => {
+      if (foldersSilentDebounceTimer) {
+        clearTimeout(foldersSilentDebounceTimer);
+        foldersSilentDebounceTimer = null;
+      }
       if (fsUpsertRefreshTimer) {
         clearTimeout(fsUpsertRefreshTimer);
         fsUpsertRefreshTimer = null;
@@ -559,6 +709,8 @@ export const MainView = defineComponent({
       }
       if (unsubEvent) { unsubEvent(); unsubEvent = null; }
       if (unsubRecon) { unsubRecon(); unsubRecon = null; }
+      setIndexJobUiSyncHandler(null);
+      window.removeEventListener('xyz-gallery-resume-after-modal', onResumeAfterProgressModal);
       window.removeEventListener('click', closeContextMenu);
       window.removeEventListener('scroll', closeContextMenu, true);
       window.removeEventListener('xyz-gallery-folders-refresh', onFoldersExternalRefresh);
@@ -582,6 +734,25 @@ export const MainView = defineComponent({
       nameTimer = setTimeout(() => {
         filterState.filter.name = nameInput.value;
       }, 250);
+    }
+
+    function clearNameFilter() {
+      if (nameTimer) clearTimeout(nameTimer);
+      nameTimer = null;
+      nameInput.value = '';
+      filterState.filter.name = '';
+    }
+
+    function clearPromptFilter() {
+      promptInput.value = '';
+      filterState.filter.positive_tokens = [];
+      scheduleVocabCacheClearTags();
+    }
+
+    function clearTagFilter() {
+      tagInput.value = '';
+      filterState.filter.tag_tokens = [];
+      scheduleVocabCacheClearTags();
     }
 
     function commitPromptTokens() {
@@ -654,16 +825,16 @@ export const MainView = defineComponent({
     const hasDateAfter = computed(() => !!filterState.filter.date_after);
     const hasDateBefore = computed(() => !!filterState.filter.date_before);
 
-    /** T32 — §11 F04: string = no fetch; word = ``/vocab/words``; prompt = ``/vocab/prompts``. */
+    /** T32 — §11 F04 string / word / phrase (wire: fetch-kind + suggestions-off). */
     const promptFilterPlaceholder = computed(() => {
       const m = filterState.filter.prompt_match_mode;
       if (m === 'string') {
-        return 'Match string: fragments → substring AND (_→ space, case-insensitive)';
+        return 'All typed fragments must appear; underscores count as spaces (not case-sensitive)';
       }
       if (m === 'word') {
-        return 'Match word: comma/space-separated; autocomplete /vocab/words';
+        return 'Words or short phrases, comma- or space-separated; suggestions as you type';
       }
-      return 'Match phrase: comma segments → §8.8 tokens; autocomplete /vocab/prompts';
+      return 'Comma-separated prompt phrases; all must match; suggestions as you type';
     });
     const promptFetchKind = computed(() => (
       filterState.filter.prompt_match_mode === 'word' ? 'words' : 'prompts'
@@ -676,24 +847,18 @@ export const MainView = defineComponent({
       setCardsPerRow(e.target.value);
     }
 
-    const SORT_OPTIONS = [
-      { value: 'time:desc', label: 'Newest first' },
-      { value: 'time:asc', label: 'Oldest first' },
-      { value: 'name:asc', label: 'Name (A → Z)' },
-      { value: 'name:desc', label: 'Name (Z → A)' },
-      { value: 'size:desc', label: 'Size (largest first)' },
-      { value: 'size:asc', label: 'Size (smallest first)' },
-      { value: 'folder:asc', label: 'Folder (A → Z)' },
-      { value: 'folder:desc', label: 'Folder (Z → A)' },
+    const SORT_KEY_OPTIONS = [
+      { value: 'time', label: 'Time' },
+      { value: 'name', label: 'Name' },
+      { value: 'size', label: 'Size' },
+      { value: 'folder', label: 'Folder' },
     ];
-    const sortValue = computed({
-      get: () => `${filterState.sort.key}:${filterState.sort.dir}`,
-      set: (v) => {
-        const [key, dir] = String(v || '').split(':');
-        if (key) filterState.sort.key = key;
-        if (dir) filterState.sort.dir = dir;
-      },
-    });
+
+    function toggleSortDir() {
+      filterState.sort.dir = filterState.sort.dir === 'asc' ? 'desc' : 'asc';
+    }
+
+    const galleryViewMode = computed(() => filterState.view_mode);
 
     function onOpenImage(id) {
       if (typeof id !== 'number' && !(typeof id === 'string' && id.length)) return;
@@ -702,7 +867,7 @@ export const MainView = defineComponent({
       // passing a ref through VirtualGrid — VirtualGrid is T13-stable
       // and its scroller element is unambiguous in the DOM.
       try {
-        const vg = document.querySelector('.vg');
+        const vg = document.querySelector('.lv-scroller') || document.querySelector('.vg');
         if (vg) {
           sessionStorage.setItem(MAIN_SCROLL_KEY, JSON.stringify({
             scrollTop: vg.scrollTop,
@@ -722,7 +887,7 @@ export const MainView = defineComponent({
       const target = pendingScrollRestore.scrollTop;
       pendingScrollRestore = null;
       nextTick(() => {
-        const vg = document.querySelector('.vg');
+        const vg = document.querySelector('.lv-scroller') || document.querySelector('.vg');
         if (vg) vg.scrollTop = target;
       });
     }
@@ -856,7 +1021,9 @@ export const MainView = defineComponent({
       contextMenu, movePickerOpen, movePickerSel, movePickerSelectionHint,
       deleteCtxOpen, deleteCtxBusy, deleteCtxErr, deleteCtxLines,
       onCtxDelete, closeDeleteCtx, onDeleteCtxConfirmed,
-      SORT_OPTIONS, sortValue,
+      SORT_KEY_OPTIONS, toggleSortDir,
+      clearNameFilter, clearPromptFilter, clearTagFilter,
+      galleryViewMode, setViewMode,
       lastOpenedId,
       onNameInput, commitPromptTokens, commitTagTokens, setPromptInput, setTagInput,
       onToggleDateBound, onSelectFolder, onToggleRecursive,
@@ -889,13 +1056,24 @@ export const MainView = defineComponent({
             </div>
             <div v-show="!panelCollapsed.filters" class="mv-filters-scroll">
               <div class="mv-filters-body">
-                <label v-show="filterVisibility.name" class="mv-field">
-                  <span>name filter:</span>
-                  <input type="text"
-                         :value="nameInput"
-                         @input="onNameInput"
-                         placeholder="substring (debounced 250 ms)" />
-                </label>
+                <div v-show="filterVisibility.name" class="mv-field mv-field--with-clear">
+                  <div class="mv-field-labelrow">
+                    <span class="mv-field-title">name filter:</span>
+                  </div>
+                  <div class="mv-field-inputrow">
+                    <input type="text"
+                           :value="nameInput"
+                           @input="onNameInput"
+                           placeholder="Type part of a filename (not case-sensitive)" />
+                    <button type="button"
+                            class="mv-field-clear"
+                            title="Clear name filter"
+                            aria-label="Clear name filter"
+                            @click="clearNameFilter">
+                      <span class="mv-field-clear-x" aria-hidden="true">×</span>
+                    </button>
+                  </div>
+                </div>
                 <label v-show="filterVisibility.metadata_presence" class="mv-field">
                   <span>Comfy metadata (indexed PNG):</span>
                   <select v-model="filter.metadata_presence">
@@ -912,25 +1090,47 @@ export const MainView = defineComponent({
                     <option value="string">Match string</option>
                   </select>
                 </label>
-                <label v-show="filterVisibility.prompt_tokens" class="mv-field">
-                  <span>positive prompt filter:</span>
-                  <Autocomplete :fetch-kind="promptFetchKind"
-                                :vocab-match-mode="vocabAutocompleteMatch"
-                                :placeholder="promptFilterPlaceholder"
-                                :suggestions-off="filter.prompt_match_mode === 'string'"
-                                :model-value="promptInput"
-                                @update:model-value="setPromptInput"
-                                @commit="commitPromptTokens" />
-                </label>
-                <label v-show="filterVisibility.tags" class="mv-field">
-                  <span>tag filter:</span>
-                  <Autocomplete fetch-kind="tags"
-                                :vocab-match-mode="vocabAutocompleteMatch"
-                                placeholder="comma-separated tags (T21 autocomplete)"
-                                :model-value="tagInput"
-                                @update:model-value="setTagInput"
-                                @commit="commitTagTokens" />
-                </label>
+                <div v-show="filterVisibility.prompt_tokens" class="mv-field mv-field--with-clear">
+                  <div class="mv-field-labelrow">
+                    <span class="mv-field-title">positive prompt filter:</span>
+                  </div>
+                  <div class="mv-field-inputrow mv-field-inputrow--ac">
+                    <Autocomplete :fetch-kind="promptFetchKind"
+                                  :vocab-match-mode="vocabAutocompleteMatch"
+                                  :placeholder="promptFilterPlaceholder"
+                                  :suggestions-off="filter.prompt_match_mode === 'string'"
+                                  :model-value="promptInput"
+                                  @update:model-value="setPromptInput"
+                                  @commit="commitPromptTokens" />
+                    <button type="button"
+                            class="mv-field-clear"
+                            title="Clear prompt filter"
+                            aria-label="Clear prompt filter"
+                            @click="clearPromptFilter">
+                      <span class="mv-field-clear-x" aria-hidden="true">×</span>
+                    </button>
+                  </div>
+                </div>
+                <div v-show="filterVisibility.tags" class="mv-field mv-field--with-clear">
+                  <div class="mv-field-labelrow">
+                    <span class="mv-field-title">tag filter:</span>
+                  </div>
+                  <div class="mv-field-inputrow mv-field-inputrow--ac">
+                    <Autocomplete fetch-kind="tags"
+                                  :vocab-match-mode="vocabAutocompleteMatch"
+                                  placeholder="Tags, comma-separated; suggestions as you type"
+                                  :model-value="tagInput"
+                                  @update:model-value="setTagInput"
+                                  @commit="commitTagTokens" />
+                    <button type="button"
+                            class="mv-field-clear"
+                            title="Clear tag filter"
+                            aria-label="Clear tag filter"
+                            @click="clearTagFilter">
+                      <span class="mv-field-clear-x" aria-hidden="true">×</span>
+                    </button>
+                  </div>
+                </div>
                 <label v-show="filterVisibility.favorite" class="mv-field">
                   <span>favorite filter:</span>
                   <select v-model="filter.favorite">
@@ -967,6 +1167,7 @@ export const MainView = defineComponent({
                   </label>
                 </fieldset>
               </div>
+              <div class="mv-filters-slack" aria-hidden="true"></div>
             </div>
           </section>
         </div>
@@ -977,7 +1178,16 @@ export const MainView = defineComponent({
              title="Drag to resize filter vs folder area"
              @mousedown.prevent="onSplitHDown"></div>
         <section class="mv-folders">
-          <h3>Folders</h3>
+          <div class="mv-folders-title-row">
+            <h3>Folders</h3>
+            <button type="button"
+                    class="ft-recursive"
+                    :aria-pressed="filter.recursive ? 'true' : 'false'"
+                    title="Include subfolders when a folder is selected"
+                    @click="onToggleRecursive(!filter.recursive)">
+              Recursive: {{ filter.recursive ? 'on' : 'off' }}
+            </button>
+          </div>
           <div v-if="foldersLoading && !folders.length" class="muted">Loading folders…</div>
           <div v-else-if="foldersError && !folders.length" class="error">
             <strong>{{ foldersError.code || 'error' }}</strong>: {{ foldersError.message }}
@@ -986,6 +1196,7 @@ export const MainView = defineComponent({
             <FolderTree :nodes="folders"
                         :selected-id="filter.folder_id"
                         :recursive="filter.recursive"
+                        :show-recursive-button="false"
                         @select="onSelectFolder"
                         @update:recursive="onToggleRecursive"
                         @folders-changed="() => fetchFolders({ silent: true })" />
@@ -1026,18 +1237,55 @@ export const MainView = defineComponent({
                    @input="onCardsPerRowInput" />
             <span class="mv-cpr-val">{{ layoutState.cardsPerRow }}</span>
           </label>
-          <label class="mv-sort">
-            <span class="muted">Sort</span>
-            <select v-model="sortValue">
-              <option v-for="o in SORT_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-            </select>
-          </label>
+          <div class="mv-sort-group muted" role="group" aria-label="Sort images">
+            <label class="mv-sort">
+              <span>Sort by</span>
+              <select v-model="sort.key" class="mv-sort-key">
+                <option v-for="o in SORT_KEY_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+            </label>
+            <button type="button"
+                    class="mv-sort-dir"
+                    :title="sort.dir === 'asc' ? 'Ascending' : 'Descending'"
+                    :aria-label="sort.dir === 'asc' ? 'Ascending' : 'Descending'"
+                    @click="toggleSortDir">{{ sort.dir === 'asc' ? '↑' : '↓' }}</button>
+          </div>
+          <span class="mv-sep muted">·</span>
+          <span class="mv-view-toggle muted" role="group" aria-label="Gallery layout">
+            <span class="mv-view-label">View</span>
+            <button type="button"
+                    class="mv-view-btn"
+                    :class="{ 'mv-view-btn--on': galleryViewMode === 'compact' }"
+                    :aria-pressed="galleryViewMode === 'compact' ? 'true' : 'false'"
+                    @click="setViewMode('compact')">Compact</button>
+            <button type="button"
+                    class="mv-view-btn"
+                    :class="{ 'mv-view-btn--on': galleryViewMode === 'line' }"
+                    :aria-pressed="galleryViewMode === 'line' ? 'true' : 'false'"
+                    @click="setViewMode('line')">Line</button>
+          </span>
         </div>
         <BulkBar v-if="bulkMode" @moved="resetAndFetch" />
 
         <div v-if="imagesError" class="error">
           <strong>{{ imagesError.code || 'error' }}</strong>: {{ imagesError.message }}
         </div>
+        <LineVirtualGrid v-else-if="galleryViewMode === 'line'"
+                         :items="images"
+                         :list-gen="gridListGen"
+                         :cards-per-row="layoutState.cardsPerRow"
+                         :total-estimate="totalCount"
+                         :has-more="hasMore"
+                         :loading="imagesLoading"
+                         :loading-more="loadingMore"
+                         :bulk-mode="bulkMode"
+                         :sort-key="sort.key"
+                         :sort-dir="sort.dir"
+                         @load-more="loadMore"
+                         @open="onOpenImage"
+                         @toggle-bulk="onToggleBulk"
+                         @toggle-favorite="onToggleFavorite"
+                         @context="onContext" />
         <VirtualGrid v-else
                      :items="images"
                      :list-gen="gridListGen"

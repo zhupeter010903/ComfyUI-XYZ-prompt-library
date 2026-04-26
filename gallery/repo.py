@@ -229,15 +229,27 @@ class UpsertImageOp:
             "tags_csv": self.tags_csv,
             "indexed_at": self.indexed_at,
         })
-        row = conn.execute("SELECT id FROM image WHERE path = ?", (self.path,)).fetchone()
+        row = conn.execute(
+            "SELECT id, tags_csv FROM image WHERE path = ?",
+            (self.path,),
+        ).fetchone()
         if row is None:
             raise RuntimeError(f"upsert left no row for path={self.path!r}")
         image_id = int(row[0])
+        # ``connect_write`` may leave row_factory unset → tuple row; use indices.
+        tags_raw = row[1]
+        # Must match the *stored* image.tags_csv, not ``self.normalized_tags`` from the
+        # PNG re-read. ``ON CONFLICT`` uses COALESCE(excluded.tags_csv, image.tags_csv);
+        # when the file has no xyz_gallery tag mirror yet, the row keeps DB tags but an
+        # empty ``normalized_tags`` list would wrongly clear ``image_tag`` (usage drift).
+        final_tag_names = _vocab.normalized_tag_list_from_csv(
+            str(tags_raw) if tags_raw is not None else None,
+        )
         UpsertVocabAndLinksOp(
             image_id=image_id,
             prompt_tokens=self.prompt_tokens,
             word_tokens=self.word_tokens,
-            tag_names=self.normalized_tags,
+            tag_names=final_tag_names,
         ).apply(conn)
 
     def _ensure_folder_chain(self, conn: sqlite3.Connection) -> None:
@@ -273,10 +285,11 @@ class UpsertImageOp:
 
 
 # Stored at module level so the (somewhat long) SQL is built once per
-# process rather than on every op.  ``COALESCE`` on ``favorite`` /
-# ``tags_csv`` protects DB-authoritative values across re-indexing runs
-# that happen to re-read a PNG whose xyz_gallery mirror chunks were not
-# (or are no longer) written.
+# process rather than on every op.  When ``metadata_sync_status`` is not
+# ``'ok'``, the DB holds user edits the on-disk file has not yet caught
+# up to — keep ``favorite`` / ``tags_csv`` from the existing row so
+# a re-index does not re-inject stale PNG values.  Otherwise, ``COALESCE`` on
+# these columns protects re-indexing when the PNG *lacks* mirror chunks.
 _UPSERT_IMAGE_SQL = """
 INSERT INTO image (
     path, folder_id, relative_path, filename, filename_lc, ext,
@@ -308,8 +321,16 @@ ON CONFLICT(path) DO UPDATE SET
     sampler          = excluded.sampler,
     scheduler        = excluded.scheduler,
     workflow_present = excluded.workflow_present,
-    favorite         = COALESCE(excluded.favorite, image.favorite),
-    tags_csv         = COALESCE(excluded.tags_csv, image.tags_csv),
+    favorite         = CASE
+      WHEN image.metadata_sync_status IN ('pending', 'failed')
+        THEN image.favorite
+        ELSE COALESCE(excluded.favorite, image.favorite)
+    END,
+    tags_csv         = CASE
+      WHEN image.metadata_sync_status IN ('pending', 'failed')
+        THEN image.tags_csv
+        ELSE COALESCE(excluded.tags_csv, image.tags_csv)
+    END,
     indexed_at       = excluded.indexed_at
 """
 
@@ -646,7 +667,14 @@ class ResyncMetadataOp:
 
 
 class UpdateImagePathOp:
-    """Rewrite ``path`` / folder columns after a successful on-disk move (T24)."""
+    """Rewrite ``path`` / folder columns after a successful on-disk move (T24).
+
+    ``refresh_sync``: when ``True`` (legacy default for direct op use in tests),
+    reset ``metadata_sync_*`` to ``pending`` so :mod:`metadata_sync` rewrites
+    PNG ``xyz_gallery.*`` chunks. Bulk / single **service** moves pass ``False``:
+    the file is only relocated on disk — bytes and mirror chunks are unchanged
+    relative to DB — so a full PNG round-trip is redundant.
+    """
 
     def __init__(
         self,
@@ -919,7 +947,12 @@ class UnindexCustomRootOp:
 
 
 class RelocateFolderSubtreeDbOp:
-    """After directory rename/move, rewrite ``folder.path`` / ``image.path`` rows."""
+    """After directory rename/move, rewrite ``folder.path`` / ``image.path`` rows.
+
+    Like :class:`UpdateImagePathOp` with ``refresh_sync=False`` (T24): the files are
+    only moved on disk — we do not reset ``metadata_sync_*``; otherwise the async
+    PNG re-embed writer would mark every file as "updating" for no benefit.
+    """
 
     def __init__(
         self,
@@ -996,11 +1029,7 @@ class RelocateFolderSubtreeDbOp:
             rel = np[len(rpn) + 1:] if len(np) > len(rpn) else ""
             conn.execute(
                 "UPDATE image SET path = ?, folder_id = ?, relative_path = ?, "
-                "file_size = ?, mtime_ns = ?, version = version + 1, "
-                "metadata_sync_status = 'pending', "
-                "metadata_sync_retry_count = 0, "
-                "metadata_sync_next_retry_at = NULL, "
-                "metadata_sync_last_error = NULL "
+                "file_size = ?, mtime_ns = ?, version = version + 1 "
                 "WHERE id = ?",
                 (np, int(rid), rel, file_size, mtime_ns, iid),
             )
@@ -1270,22 +1299,63 @@ class InsertThumbCacheOp:
 
 
 class SetSyncStatusOp:
-    """Mark PNG metadata sync as ``ok`` only if ``version`` still matches (T17)."""
+    """Mark PNG metadata sync as ``ok`` only if ``version`` still matches (T17).
 
-    def __init__(self, *, image_id: int, expected_version: int):
+    When ``refresh_file_size`` and ``refresh_mtime_ns`` are both set (after a
+    successful :func:`metadata.write_xyz_chunks`), the row's on-disk
+    fingerprint is updated in the same UPDATE so the file-watcher
+    :func:`indexer.index_one` short-circuits instead of enqueueing a redundant
+    :class:`UpsertImageOp` + ``image.upserted`` storm (bulk move / batch sync).
+    """
+
+    def __init__(
+        self,
+        *,
+        image_id: int,
+        expected_version: int,
+        refresh_file_size: Optional[int] = None,
+        refresh_mtime_ns: Optional[int] = None,
+    ):
         self.image_id = int(image_id)
         self.expected_version = int(expected_version)
+        self.refresh_file_size = (
+            None if refresh_file_size is None else int(refresh_file_size)
+        )
+        self.refresh_mtime_ns = (
+            None if refresh_mtime_ns is None else int(refresh_mtime_ns)
+        )
 
     def apply(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            "UPDATE image SET "
-            "metadata_sync_status = 'ok', "
-            "metadata_sync_retry_count = 0, "
-            "metadata_sync_next_retry_at = NULL, "
-            "metadata_sync_last_error = NULL "
-            "WHERE id = ? AND version = ?",
-            (self.image_id, self.expected_version),
-        )
+        if (
+            self.refresh_file_size is not None
+            and self.refresh_mtime_ns is not None
+        ):
+            conn.execute(
+                "UPDATE image SET "
+                "metadata_sync_status = 'ok', "
+                "metadata_sync_retry_count = 0, "
+                "metadata_sync_next_retry_at = NULL, "
+                "metadata_sync_last_error = NULL, "
+                "file_size = ?, "
+                "mtime_ns = ? "
+                "WHERE id = ? AND version = ?",
+                (
+                    self.refresh_file_size,
+                    self.refresh_mtime_ns,
+                    self.image_id,
+                    self.expected_version,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE image SET "
+                "metadata_sync_status = 'ok', "
+                "metadata_sync_retry_count = 0, "
+                "metadata_sync_next_retry_at = NULL, "
+                "metadata_sync_last_error = NULL "
+                "WHERE id = ? AND version = ?",
+                (self.image_id, self.expected_version),
+            )
 
 
 class SetSyncFailedOp:
@@ -1399,9 +1469,9 @@ class SortSpec:
       * ``name``   → ``filename_lc``  (hits ``idx_image_filename_lc``)
       * ``time``   → ``created_at``   (hits ``idx_image_created_at``)
       * ``size``   → ``file_size``    (hits ``idx_image_file_size``)
-      * ``folder`` → ``path``         (POSIX lex, uses ``UNIQUE(path)``
-                                       auto-index; folders group
-                                       naturally by directory prefix)
+      * ``folder`` → lowercased line-header label (root ``display_name`` /
+        ``kind`` + optional ``/`` + parent dir of ``relative_path``),
+        matching the gallery UI section title (see ``folder_header.py``).
     """
     key: str = "time"
     dir: str = "desc"
@@ -1553,6 +1623,10 @@ class Neighbors:
 # JOIN to ``folder`` is safe because ``image.folder_id`` is constrained
 # to a registered root (PROJECT_STATE §4 #27); the LEFT is defensive
 # against transient rows during migration.
+_FOLDER_LINE_SORT_SQL = (
+    "lower(xyz_folder_line_header("
+    "image.relative_path, folder.display_name, folder.kind))"
+)
 _IMAGE_SELECT = (
     "SELECT image.id, image.path, image.folder_id, "
     "image.relative_path, image.filename, image.filename_lc, image.ext, "
@@ -1561,14 +1635,15 @@ _IMAGE_SELECT = (
     "image.model, image.seed, image.cfg, image.sampler, image.scheduler, "
     "image.workflow_present, image.favorite, image.tags_csv, "
     "image.metadata_sync_status, image.version, "
-    "folder.kind AS folder_kind, folder.display_name AS folder_display_name "
+    "folder.kind AS folder_kind, folder.display_name AS folder_display_name, "
+    f"{_FOLDER_LINE_SORT_SQL} AS folder_line_header "
     "FROM image LEFT JOIN folder ON folder.id = image.folder_id"
 )
 
 
-# Maps public sort key → (SQL expression, Python type coercer for cursor
-# round-trip). The expression must be indexed (or cheap) so that
-# ``ORDER BY <expr>`` scales — see module docstring / R7.1.
+# Maps public sort key → SQL expression for ``ORDER BY`` / cursor predicates.
+# ``name`` / ``time`` / ``size`` hit dedicated indexes; ``folder`` uses the
+# ``xyz_folder_line_header`` UDF (label order, not ``path``).
 def _sort_column(key: str) -> str:
     # Use a local conditional rather than a dict so the SQL literal is
     # never built from user input — keeps any future grep-for-injection
@@ -1580,7 +1655,7 @@ def _sort_column(key: str) -> str:
     if key == "size":
         return "image.file_size"
     if key == "folder":
-        return "image.path"
+        return _FOLDER_LINE_SORT_SQL
     raise ValueError(f"unknown sort key: {key!r}")
 
 
@@ -2293,7 +2368,7 @@ def _sort_col_key(key: str) -> str:
         "name":   "filename_lc",
         "time":   "created_at",
         "size":   "file_size",
-        "folder": "path",
+        "folder": "folder_line_header",
     }[key]
 
 
@@ -2322,7 +2397,9 @@ def neighbors(
         # column directly.
         sort_col = _sort_column(srt.key)
         anchor = conn.execute(
-            f"SELECT {sort_col} AS sv, image.id FROM image WHERE image.id = ?",
+            f"SELECT {sort_col} AS sv, image.id "
+            "FROM image LEFT JOIN folder ON folder.id = image.folder_id "
+            "WHERE image.id = ?",
             (int(image_id),),
         ).fetchone()
         if anchor is None:

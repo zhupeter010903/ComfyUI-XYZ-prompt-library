@@ -21,6 +21,7 @@ let reconnectMs = 1000;
 const RECONNECT_CAP_MS = 30000;
 let eventSubs = new Set();
 let reconcileSubs = new Set();
+let onOpenSubs = new Set();
 let focusBound = false;
 
 function noteEnvelopeTs(env) {
@@ -40,6 +41,24 @@ export function subscribeGalleryEvent(fn) {
 export function subscribeReconcile(fn) {
   reconcileSubs.add(fn);
   return () => { reconcileSubs.delete(fn); };
+}
+
+export function onWebSocketOpen(fn) {
+  onOpenSubs.add(fn);
+  if (typeof window !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
+    try { fn(); } catch (e) { console.error('[gallery ws open]', e); }
+  }
+  return () => { onOpenSubs.delete(fn); };
+}
+
+function _emitOnOpen() {
+  for (const fn of onOpenSubs) {
+    try {
+      fn();
+    } catch (e) {
+      console.error('[gallery ws onOpen]', e);
+    }
+  }
 }
 
 function emitToSubs(set, a1, a2) {
@@ -106,6 +125,7 @@ function openSocket() {
   socket.addEventListener('open', () => {
     reconnectMs = 1000;
     runFocusReconcile();
+    _emitOnOpen();
   });
   socket.addEventListener('message', (ev) => {
     let env;
@@ -148,6 +168,7 @@ export function stopGalleryConnectionForTest() {
   }
   eventSubs = new Set();
   reconcileSubs = new Set();
+  onOpenSubs = new Set();
   lastAppliedTs = 0;
 }
 

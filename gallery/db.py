@@ -18,6 +18,8 @@ import sqlite3
 from pathlib import Path
 from typing import Callable, Dict, Union
 
+from . import folder_header as _folder_header
+
 __all__ = [
     "connect_read",
     "connect_write",
@@ -31,6 +33,15 @@ __all__ = [
 
 _MMAP_BYTES = 256 * 1024 * 1024
 _BUSY_TIMEOUT_MS = 5000
+
+
+def _register_sqlite_functions(conn: sqlite3.Connection) -> None:
+    """Per-connection helpers (folder sort label, etc.)."""
+    conn.create_function(
+        "xyz_folder_line_header",
+        3,
+        _folder_header.folder_line_header_value_sql,
+    )
 
 
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
@@ -52,6 +63,7 @@ def connect_read(path: _PathLike) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     _apply_pragmas(conn)
     conn.row_factory = sqlite3.Row
+    _register_sqlite_functions(conn)
     return conn
 
 
@@ -64,6 +76,7 @@ def connect_write(path: _PathLike) -> sqlite3.Connection:
     """
     conn = sqlite3.connect(str(path), isolation_level=None)
     _apply_pragmas(conn)
+    _register_sqlite_functions(conn)
     return conn
 
 

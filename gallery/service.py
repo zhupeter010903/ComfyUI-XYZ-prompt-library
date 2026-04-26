@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from . import audit as _audit
 from . import db as _db
@@ -31,6 +31,24 @@ from . import ws_hub as _ws_hub
 logger = logging.getLogger("xyz.gallery.service")
 
 BULK_HIGH_IF_TOTAL_LEQ: int = 64
+
+
+def _emit_bulk_progress(d: dict) -> None:
+    from . import job_registry as _jr
+
+    out = _jr.sync_bulk_payload(d)
+    _ws_hub.broadcast(_ws_hub.BULK_PROGRESS, out)
+
+
+def _emit_bulk_completed(d: dict) -> None:
+    from . import job_registry as _jr
+
+    out = dict(d)
+    bid = out.get("bulk_id") or out.get("plan_id")
+    if bid is not None and "job_id" not in out:
+        out["job_id"] = str(bid)
+    _ws_hub.broadcast(_ws_hub.BULK_COMPLETED, out)
+    _jr.finish_bulk(out)
 
 __all__ = [
     "update_image",
@@ -438,8 +456,7 @@ def execute_move(
     ok_count = 0
     failed: List[dict] = []
 
-    _ws_hub.broadcast(
-        _ws_hub.BULK_PROGRESS,
+    _emit_bulk_progress(
         {
             "plan_id": plan_id,
             "bulk_id": plan_id,
@@ -477,7 +494,9 @@ def execute_move(
                         ext=ext,
                         file_size=file_size,
                         mtime_ns=mtime_ns,
-                        refresh_sync=True,
+                        # Pure filesystem move: file bytes (incl. xyz_gallery.*) unchanged;
+                        # DB tags/favorite unchanged — skip PNG metadata_sync storm (T24).
+                        refresh_sync=False,
                     ),
                 )
                 ver = int(fut.result(timeout=120.0))
@@ -490,7 +509,6 @@ def execute_move(
                         "moved_to": path_posix,
                     },
                 )
-                _metadata_sync.notify(int(m.image_id), ver)
         except Exception as exc:  # noqa: BLE001
             failed.append(
                 {
@@ -500,8 +518,7 @@ def execute_move(
                 },
             )
             logger.exception("execute_move failed id=%s", m.image_id)
-        _ws_hub.broadcast(
-            _ws_hub.BULK_PROGRESS,
+        _emit_bulk_progress(
             {
                 "plan_id": plan_id,
                 "bulk_id": plan_id,
@@ -513,8 +530,7 @@ def execute_move(
         if (i + 1) % 50 == 0:
             time.sleep(0)
 
-    _ws_hub.broadcast(
-        _ws_hub.BULK_COMPLETED,
+    _emit_bulk_completed(
         {
             "plan_id": plan_id,
             "bulk_id": plan_id,
@@ -621,7 +637,7 @@ def move_single_image(
             ext=ext,
             file_size=file_size,
             mtime_ns=mtime_ns,
-            refresh_sync=True,
+            refresh_sync=False,
         ),
     )
     ver = int(fut.result(timeout=120.0))
@@ -629,7 +645,6 @@ def move_single_image(
         _ws_hub.IMAGE_UPDATED,
         {"id": int(image_id), "version": ver, "moved_to": path_posix},
     )
-    _metadata_sync.notify(int(image_id), ver)
 
     out = _repo.get_image(int(image_id), db_path=db_path)
     if out is None:
@@ -689,8 +704,7 @@ def execute_delete(plan_id: str, *, db_path: Path, actor: str = "unknown") -> di
     ok_count = 0
     bid = plan_id
 
-    _ws_hub.broadcast(
-        _ws_hub.BULK_PROGRESS,
+    _emit_bulk_progress(
         {
             "plan_id": bid,
             "bulk_id": bid,
@@ -723,8 +737,7 @@ def execute_delete(plan_id: str, *, db_path: Path, actor: str = "unknown") -> di
                 },
             )
             logger.exception("execute_delete id=%s", image_id)
-        _ws_hub.broadcast(
-            _ws_hub.BULK_PROGRESS,
+        _emit_bulk_progress(
             {
                 "plan_id": bid,
                 "bulk_id": bid,
@@ -736,8 +749,7 @@ def execute_delete(plan_id: str, *, db_path: Path, actor: str = "unknown") -> di
         if (i + 1) % 50 == 0:
             time.sleep(0)
 
-    _ws_hub.broadcast(
-        _ws_hub.BULK_COMPLETED,
+    _emit_bulk_completed(
         {
             "plan_id": bid,
             "bulk_id": bid,
@@ -983,8 +995,7 @@ def bulk_set_favorite(
     total = len(rows)
     bulk_id = str(uuid.uuid4())
     if total == 0:
-        _ws_hub.broadcast(
-            _ws_hub.BULK_COMPLETED,
+        _emit_bulk_completed(
             {
                 "bulk_id": bulk_id, "done": 0, "total": 0, "kind": "favorite",
             },
@@ -995,14 +1006,14 @@ def bulk_set_favorite(
     roots = _folders.list_roots(db_path=db_path)
     root_paths = [r["path"] for r in roots]
     wq = _write_queue_handle()
-    _ws_hub.broadcast(
-        _ws_hub.BULK_PROGRESS,
+    _emit_bulk_progress(
         {
             "bulk_id": bulk_id, "done": 0, "total": total, "kind": "favorite",
         },
     )
     failed: List[dict] = []
     ok_count = 0
+    sync_hint: Dict[int, int] = {}
     for i, (image_id, path) in enumerate(rows):
         try:
             _paths.assert_inside_root(path, root_paths)
@@ -1042,9 +1053,8 @@ def bulk_set_favorite(
                     "favorite": bool(value),
                 },
             )
-            _metadata_sync.notify(int(image_id), ver)
-        _ws_hub.broadcast(
-            _ws_hub.BULK_PROGRESS,
+            sync_hint[int(image_id)] = int(ver)
+        _emit_bulk_progress(
             {
                 "bulk_id": bulk_id,
                 "done": i + 1,
@@ -1052,8 +1062,9 @@ def bulk_set_favorite(
                 "kind": "favorite",
             },
         )
-    _ws_hub.broadcast(
-        _ws_hub.BULK_COMPLETED,
+    if sync_hint:
+        _metadata_sync.queue_many(sync_hint)
+    _emit_bulk_completed(
         {
             "bulk_id": bulk_id,
             "done": total,
@@ -1086,8 +1097,7 @@ def bulk_edit_tags(
     total = len(rows)
     bulk_id = str(uuid.uuid4())
     if total == 0:
-        _ws_hub.broadcast(
-            _ws_hub.BULK_COMPLETED,
+        _emit_bulk_completed(
             {"bulk_id": bulk_id, "done": 0, "total": 0, "kind": "tags"},
         )
         return {"affected": 0, "bulk_id": bulk_id}
@@ -1096,14 +1106,14 @@ def bulk_edit_tags(
     roots = _folders.list_roots(db_path=db_path)
     root_paths = [r["path"] for r in roots]
     wq = _write_queue_handle()
-    _ws_hub.broadcast(
-        _ws_hub.BULK_PROGRESS,
+    _emit_bulk_progress(
         {
             "bulk_id": bulk_id, "done": 0, "total": total, "kind": "tags",
         },
     )
     failed: List[dict] = []
     ok_count = 0
+    sync_hint2: Dict[int, int] = {}
     for i, (image_id, path, tags_csv) in enumerate(rows):
         try:
             _paths.assert_inside_root(path, root_paths)
@@ -1112,8 +1122,7 @@ def bulk_edit_tags(
                 {"id": int(image_id), "code": "sandbox", "message": str(e)},
             )
             logger.warning("bulk_edit_tags sandbox id=%s: %s", image_id, e)
-            _ws_hub.broadcast(
-                _ws_hub.BULK_PROGRESS,
+            _emit_bulk_progress(
                 {
                     "bulk_id": bulk_id,
                     "done": i + 1,
@@ -1124,9 +1133,22 @@ def bulk_edit_tags(
             continue
         cur = _tags_from_csv(tags_csv)
         new_list = _merge_tag_lists(cur, add_n, rem_n)
-        if list(cur) == new_list:
-            _ws_hub.broadcast(
-                _ws_hub.BULK_PROGRESS,
+        # Must match what UpdateImageOp will write: ",".join(new_list) or NULL for empty.
+        # list(cur) == new_list is unsafe (tuple vs list) and can diverge from tags_csv
+        # string form; one bad skip leaves disk/DB out of sync with a few items.
+        if (not new_list) and (not cur):
+            _emit_bulk_progress(
+                {
+                    "bulk_id": bulk_id,
+                    "done": i + 1,
+                    "total": total,
+                    "kind": "tags",
+                },
+            )
+            continue
+        want_csv: Optional[str] = ",".join(new_list) if new_list else None
+        if want_csv is not None and (tags_csv or "") == want_csv:
+            _emit_bulk_progress(
                 {
                     "bulk_id": bulk_id,
                     "done": i + 1,
@@ -1172,9 +1194,8 @@ def bulk_edit_tags(
                     "tags": list(new_list),
                 },
             )
-            _metadata_sync.notify(int(image_id), ver)
-        _ws_hub.broadcast(
-            _ws_hub.BULK_PROGRESS,
+            sync_hint2[int(image_id)] = int(ver)
+        _emit_bulk_progress(
             {
                 "bulk_id": bulk_id,
                 "done": i + 1,
@@ -1182,8 +1203,9 @@ def bulk_edit_tags(
                 "kind": "tags",
             },
         )
-    _ws_hub.broadcast(
-        _ws_hub.BULK_COMPLETED,
+    if sync_hint2:
+        _metadata_sync.queue_many(sync_hint2)
+    _emit_bulk_completed(
         {
             "bulk_id": bulk_id,
             "done": total,
@@ -1293,6 +1315,51 @@ def folder_unregister_custom_root(
     _broadcast_folder_changed(int(folder_id))
 
 
+def _moved_subtree_bypass_path_sets(
+    old_prefix: str, new_prefix: str, *, db_path: Path,
+) -> Tuple[Set[str], Set[str]]:
+    """After ``RelocateFolderSubtree``, return exact (old, new) image path sets
+    for the moved subtree. Used to skip redundant watcher d/u (bulk-move style).
+    """
+    n_new = _repo._norm_fs_path(new_prefix)
+    o_old = _repo._norm_fs_path(old_prefix)
+    new_set: Set[str] = set()
+    conn = _db.connect_read(db_path)
+    try:
+        like_pat = _repo._sql_like_escape(n_new) + "/%"
+        for (pth,) in conn.execute(
+            "SELECT path FROM image "
+            "WHERE path = ? OR (path LIKE ? ESCAPE '\\')",
+            (n_new, like_pat),
+        ):
+            new_set.add(_repo._norm_fs_path(str(pth)))
+    finally:
+        conn.close()
+    old_set: Set[str] = set()
+    for p in new_set:
+        if p == n_new:
+            old_set.add(o_old)
+        elif p.startswith(n_new + "/"):
+            rel = p[len(n_new) + 1 :]
+            old_set.add(f"{o_old}/{rel}" if o_old else rel)
+    return old_set, new_set
+
+
+def _register_moved_subtree_bypass(old_p: str, new_p: str, *, db_path: Path) -> None:
+    try:
+        s_old, s_new = _moved_subtree_bypass_path_sets(old_p, new_p, db_path=db_path)
+        if not s_old and not s_new:
+            return
+        from . import watcher as _watcher
+
+        _watcher.register_moved_subtree_bypass(s_old, s_new)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "register_moved_subtree_bypass failed old=%r new=%r",
+            old_p, new_p, exc_info=True,
+        )
+
+
 def folder_schedule_rescan(folder_id: int, *, db_path: Path) -> None:
     pair = _repo.fetch_folder_with_root(db_path=db_path, folder_id=int(folder_id))
     if pair is None:
@@ -1306,11 +1373,13 @@ def folder_schedule_rescan(folder_id: int, *, db_path: Path) -> None:
     }
 
     def _worker() -> None:
+        from . import indexer as _indexer
+        from . import job_registry as _jr
         try:
-            from . import indexer as _indexer
-
+            jid = _jr.new_job_id()
             _indexer.delta_scan(
                 root_dict, db_path=db_path, write_queue=wq, mode="light",
+                job_id=jid,
             )
         except Exception:
             logger.exception("folder rescan worker failed root_id=%s", root_dict["id"])
@@ -1395,8 +1464,13 @@ def folder_rename(folder_id: int, new_name: str, *, db_path: Path) -> None:
         ),
     )
     fut_rec.result(timeout=120.0)
+    _register_moved_subtree_bypass(str(old_p), new_p, db_path=db_path)
     _broadcast_folder_changed(int(root["id"]))
-    folder_schedule_rescan(int(root["id"]), db_path=db_path)
+    # RelocateFolderSubtree + Reconcile already make folder/image paths
+    # consistent. A follow-up full-root delta_scan would only duplicate
+    # work with the file-watcher d+u storm and can stall progress for
+    # large subfolders. Manual rescan remains available on the API.
+    # Watcher d/u for moved files is also skipped for exact precomputed paths.
 
 
 def folder_move(folder_id: int, target_parent_id: int, *, db_path: Path) -> None:
@@ -1472,7 +1546,10 @@ def folder_move(folder_id: int, target_parent_id: int, *, db_path: Path) -> None
         fut_rec.result(timeout=120.0)
     for r in seen.values():
         _broadcast_folder_changed(int(r["id"]))
-        folder_schedule_rescan(int(r["id"]), db_path=db_path)
+    _register_moved_subtree_bypass(o_str, str(new_abs), db_path=db_path)
+    # Intentionally no folder_schedule_rescan: same as folder_rename
+    # (see comment there). Watcher T20 + optional manual rescan cover drift;
+    # moved file d/u is skipped for exact precomputed path pairs.
 
 
 def folder_delete_preview(folder_id: int, *, db_path: Path) -> Dict[str, Any]:
@@ -1628,22 +1705,42 @@ def tag_admin_list(
 def _broadcast_image_updated_tags(
     image_id: int, version: int, *, db_path: Path,
 ) -> None:
-    """WS + metadata worker — include ``tags`` so the SPA can patch rows without refetch."""
+    """``image.updated`` (tags) for callers that batch `metadata_sync.queue_many` (T44)."""
     rec = _repo.get_image(int(image_id), db_path=db_path)
     payload: Dict[str, Any] = {"id": int(image_id), "version": int(version)}
     if rec is not None:
         payload["tags"] = list(rec.tags)
     _ws_hub.broadcast(_ws_hub.IMAGE_UPDATED, payload)
-    _metadata_sync.notify(int(image_id), int(version))
 
 
 def tag_admin_delete(*, name: str, db_path: Path) -> Dict[str, Any]:
+    from . import job_registry as _jr
+
     wq = _write_queue_handle()
     fut = wq.enqueue_write(_repo.MID, _repo.DeleteTagByNameOp(name=name))
     out = fut.result(timeout=120.0)
-    for pair in out.get("affected") or ():
+    aff = list(out.get("affected") or ())
+    to_sync: Dict[int, int] = {}
+    naff = len(aff)
+    jid: Optional[str] = _jr.new_job_id() if naff > 1 else None
+    if jid is not None:
+        _jr.start_generic_job(
+            jid, kind="tag_delete", done=0, total=naff, phase="notify", message="",
+        )
+    for k, pair in enumerate(aff):
         iid, ver = int(pair[0]), int(pair[1])
+        to_sync[iid] = ver
         _broadcast_image_updated_tags(iid, ver, db_path=db_path)
+        if jid is not None and ((k + 1) % 10 == 0 or (k + 1) == naff):
+            _jr.emit_job_progress(
+                jid, kind="tag_delete", done=k + 1, total=naff, phase="notify",
+            )
+    if to_sync:
+        _metadata_sync.queue_many(to_sync)
+    if jid is not None and naff > 1:
+        _jr.emit_job_done(
+            jid, kind="tag_delete", terminal="ok", ok=naff, failed=0, phase="notify",
+        )
     return out
 
 
@@ -1655,13 +1752,34 @@ def tag_admin_purge_zero(*, db_path: Path) -> Dict[str, Any]:
 
 
 def tag_admin_rename(*, old_name: str, new_name: str, db_path: Path) -> Dict[str, Any]:
+    from . import job_registry as _jr
+
     wq = _write_queue_handle()
     fut = wq.enqueue_write(
         _repo.MID,
         _repo.RenameTagOp(old_name=old_name, new_name=new_name),
     )
     out = fut.result(timeout=120.0)
-    for pair in out.get("affected") or ():
+    aff = list(out.get("affected") or ())
+    to_sync: Dict[int, int] = {}
+    naff = len(aff)
+    jid2: Optional[str] = _jr.new_job_id() if naff > 1 else None
+    if jid2 is not None:
+        _jr.start_generic_job(
+            jid2, kind="tag_rename", done=0, total=naff, phase="notify", message="",
+        )
+    for k, pair in enumerate(aff):
         iid, ver = int(pair[0]), int(pair[1])
+        to_sync[iid] = ver
         _broadcast_image_updated_tags(iid, ver, db_path=db_path)
+        if jid2 is not None and ((k + 1) % 10 == 0 or (k + 1) == naff):
+            _jr.emit_job_progress(
+                jid2, kind="tag_rename", done=k + 1, total=naff, phase="notify",
+            )
+    if to_sync:
+        _metadata_sync.queue_many(to_sync)
+    if jid2 is not None and naff > 1:
+        _jr.emit_job_done(
+            jid2, kind="tag_rename", terminal="ok", ok=naff, failed=0, phase="notify",
+        )
     return out

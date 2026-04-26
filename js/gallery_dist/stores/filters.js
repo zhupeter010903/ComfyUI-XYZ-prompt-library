@@ -33,6 +33,8 @@ const CARDS_PER_ROW_DEFAULT = 6;
 const VALID_FAV = new Set(['all', 'yes', 'no']);
 const VALID_SORT_KEY = new Set(['name', 'time', 'size', 'folder']);
 const VALID_SORT_DIR = new Set(['asc', 'desc']);
+/** T45 — compact grid vs line sections (PROJECT_SPEC §12.2); not mirrored to URL. */
+const VALID_VIEW_MODE = new Set(['compact', 'line']);
 /** T31 / SPEC §11 F03 — wire ``metadata_presence`` (default ``all`` = omit). */
 const VALID_METADATA_PRESENCE = new Set(['all', 'yes', 'no']);
 /** T31 / SPEC §11 F04 — wire ``prompt_match_mode`` (default ``prompt`` = omit). */
@@ -53,6 +55,7 @@ export const DEFAULT_FILTER = Object.freeze({
 });
 
 export const DEFAULT_SORT = Object.freeze({ key: 'time', dir: 'desc' });
+export const DEFAULT_VIEW_MODE = 'compact';
 
 function cloneDefaults() {
   return {
@@ -64,6 +67,7 @@ function cloneDefaults() {
       prompt_match_mode: 'prompt',
     },
     sort: { ...DEFAULT_SORT },
+    view_mode: DEFAULT_VIEW_MODE,
   };
 }
 
@@ -115,7 +119,7 @@ function _readURL() {
     const v = sp.get('dir');
     if (VALID_SORT_DIR.has(v)) { sort.dir = v; hasAny = true; }
   }
-  return hasAny ? { filter, sort } : null;
+  return hasAny ? { filter, sort, view_mode: DEFAULT_VIEW_MODE } : null;
 }
 
 function _readLocal() {
@@ -142,14 +146,32 @@ function _readLocal() {
     const s = obj.sort || {};
     if (VALID_SORT_KEY.has(s.key)) sort.key = s.key;
     if (VALID_SORT_DIR.has(s.dir)) sort.dir = s.dir;
-    return { filter, sort };
+    let view_mode = DEFAULT_VIEW_MODE;
+    const vm = obj.view_mode;
+    if (typeof vm === 'string' && VALID_VIEW_MODE.has(vm)) view_mode = vm;
+    return { filter, sort, view_mode };
   } catch {
     return null;
   }
 }
 
+/**
+ * URL query wins for filter/sort (FR-4); ``view_mode`` is not in the URL and is
+ * merged from the same localStorage blob so deep links keep layout preference
+ * (T45 / ARCHITECTURE §7.6 single preference plane with filters store).
+ */
 function _initialState() {
-  return _readURL() || _readLocal() || cloneDefaults();
+  const url = _readURL();
+  const loc = _readLocal();
+  if (url) {
+    if (loc && VALID_VIEW_MODE.has(loc.view_mode)) {
+      url.view_mode = loc.view_mode;
+    } else {
+      url.view_mode = DEFAULT_VIEW_MODE;
+    }
+    return url;
+  }
+  return loc || cloneDefaults();
 }
 
 const _init = _initialState();
@@ -157,7 +179,13 @@ const _init = _initialState();
 export const filterState = reactive({
   filter: _init.filter,
   sort: _init.sort,
+  view_mode: VALID_VIEW_MODE.has(_init.view_mode) ? _init.view_mode : DEFAULT_VIEW_MODE,
 });
+
+export function setViewMode(mode) {
+  const m = String(mode || '').toLowerCase();
+  if (VALID_VIEW_MODE.has(m)) filterState.view_mode = m;
+}
 
 export const panelCollapsed = reactive({
   filters: (() => {
@@ -254,12 +282,13 @@ function _persist() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       filter: filterState.filter,
       sort: filterState.sort,
+      view_mode: filterState.view_mode,
     }));
   } catch { /* storage unavailable */ }
 }
 
 watch(
-  () => [filterState.filter, filterState.sort],
+  () => [filterState.filter, filterState.sort, filterState.view_mode],
   () => { _syncURL(); _persist(); },
   { deep: true }
 );

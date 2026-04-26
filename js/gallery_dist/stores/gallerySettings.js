@@ -49,6 +49,9 @@ export const filterVisibility = reactive({
   dates: true,
 });
 
+/** MainView bumps filters pane height to fit visible filters after Settings → Save. */
+export const filtersPaneFitRequest = ref(0);
+
 export const downloadBasenamePrefix = ref('');
 /** When true, each download opens a variant picker; ``download_variant`` is ignored until then. */
 export const downloadPromptEachTime = ref(false);

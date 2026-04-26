@@ -90,6 +90,14 @@ def test_fifty_corpus_rows() -> None:
         _assert_eq(f"row{i}", got, exp)
 
 
+def test_normalize_tag_numeric_preserved() -> None:
+    """Pure-digit tags are valid gallery labels (not prompt vocab tokens)."""
+    from gallery import vocab
+
+    assert vocab.normalize_tag("111") == "111"
+    assert vocab.normalize_tag("  42  ") == "42"
+
+
 def test_normalize_tag_joins() -> None:
     from gallery import vocab
 
@@ -267,6 +275,27 @@ def test_schema_v3_and_vocab_op() -> None:
                 "WHERE image_prompt_token.image_id = ?",
                 (iid,),
             ).fetchone()[0] == "onlyone"
+            # Second upsert had tags_csv=None in the op (simulates re-index with no
+            # tag mirror in PNG). COALESCE preserves image.tags_csv; image_tag must
+            # follow the row, not the empty in-memory tag list (otherwise usage/drift).
+            tcsv = r3.execute(
+                "SELECT tags_csv FROM image WHERE id = ?",
+                (iid,),
+            ).fetchone()[0]
+            assert tcsv is not None and "alpha" in str(tcsv) and "beta" in str(tcsv)
+            assert r3.execute(
+                "SELECT COUNT(*) FROM image_tag WHERE image_id = ?",
+                (iid,),
+            ).fetchone()[0] == 2
+            tnames = tuple(
+                str(r[0]) for r in r3.execute(
+                    "SELECT t.name FROM image_tag it "
+                    "JOIN tag t ON t.id = it.tag_id WHERE it.image_id = ? "
+                    "ORDER BY t.name",
+                    (iid,),
+                )
+            )
+            assert tnames == ("alpha", "beta"), tnames
         finally:
             r3.close()
     finally:
@@ -281,6 +310,7 @@ def test_schema_v3_and_vocab_op() -> None:
 def main() -> None:
     test_canonical_prompt()
     test_fifty_corpus_rows()
+    test_normalize_tag_numeric_preserved()
     test_normalize_tag_joins()
     test_stopwords_merge()
     test_naive_split_is_larger()

@@ -127,7 +127,8 @@ def _assert_folder_tree_contract() -> None:
     assert "selectedId === id ? null : id" in body
     # Renders an "All folders" entry (deselect shortcut).
     assert "All folders" in body
-    # Recursive toggle button text.
+    # Recursive toggle 可选（MainView 可收到 ``show-recursive-button="false"``）
+    assert "showRecursiveButton" in body
     assert "Recursive:" in body
     print("T12 components/FolderTree.js contract OK")
 
@@ -160,6 +161,8 @@ def _assert_main_view_contract() -> None:
     assert "'/folders'" in body and "include_counts" in body
     assert "'/images'" in body
     assert "'/images/count'" in body
+    # Recursive 与 Folders 标题同列（主视图按钮；FolderTree 可隐去内置条）
+    assert "mv-folders-title-row" in body and "show-recursive-button=\"false\"" in body
     # Re-fetch on filter change (test #1).
     assert "watch(" in body
     assert "apiQueryObject" in body

@@ -5,23 +5,26 @@ import {
 import * as api from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
 import { ConfirmModal } from '../components/ConfirmModal.js';
+import { IconButton } from '../components/IconButton.js';
 import {
   setVocabAutocompleteMatch,
   vocabAutocompleteMatch,
   resetLayoutToDefaults,
   applyServerPreferences,
   applyThemeToDocument,
+  filtersPaneFitRequest,
 } from '../stores/gallerySettings.js';
 
+/** Same order as MainView sidebar filters (top → bottom). */
 const FV_LABELS = [
-  ['name', 'Name'],
-  ['metadata_presence', 'Comfy metadata'],
+  ['name', 'Name filter'],
+  ['metadata_presence', 'Comfy metadata (indexed PNG)'],
   ['prompt_mode', 'Prompt match mode'],
   ['prompt_tokens', 'Positive prompt filter'],
   ['tags', 'Tag filter'],
-  ['favorite', 'Favorite'],
-  ['model', 'Model'],
-  ['dates', 'Date range'],
+  ['favorite', 'Favorite filter'],
+  ['model', 'Model filter'],
+  ['dates', 'Date filter'],
 ];
 
 function _fireFoldersRefresh() {
@@ -32,7 +35,7 @@ function _fireFoldersRefresh() {
 
 export const SettingsView = defineComponent({
   name: 'SettingsView',
-  components: { Autocomplete, ConfirmModal },
+  components: { Autocomplete, ConfirmModal, IconButton },
   props: {
     backHref: { type: String, default: '#/' },
   },
@@ -269,6 +272,7 @@ export const SettingsView = defineComponent({
         });
         applyServerPreferences(out);
         applyThemeToDocument();
+        filtersPaneFitRequest.value += 1;
         saveFlashOk.value = true;
         saveFlashTimer = window.setTimeout(() => {
           saveFlashOk.value = false;
@@ -472,7 +476,7 @@ export const SettingsView = defineComponent({
   template: `
     <div class="gs-window-inner">
       <header class="gs-win-toolbar">
-        <a :href="backHref" class="gs-toolbar-back">&larr; Back</a>
+        <IconButton :href="backHref" class="ib" text="Back" title="Close settings" />
         <h1 id="gs-dialog-title" class="gs-toolbar-title">Settings</h1>
         <button type="button"
                 class="gs-btn primary gs-toolbar-save"
@@ -512,7 +516,7 @@ export const SettingsView = defineComponent({
           <section id="gs-filters" class="gs-sec gs-sec--fv">
             <h2>Main view — filter visibility</h2>
             <p class="muted gs-hint">Hidden filters are not sent to the server until shown again.</p>
-            <div class="gs-fv-grid">
+            <div class="gs-fv-list">
               <label class="gs-fv-item" v-for="([key, lbl]) in FV_LABELS" :key="key">
                 <input type="checkbox" v-model="form.filterVisibility[key]" />
                 <span>{{ lbl }}</span>
@@ -566,7 +570,7 @@ export const SettingsView = defineComponent({
               <Autocomplete fetch-kind="tags"
                             class="gs-tag-ac"
                             :vocab-match-mode="tagAcMatch"
-                            placeholder="Search tags (substring)…"
+                            placeholder="Search tag names…"
                             :model-value="tagSearch"
                             @update:model-value="setTagSearchInput"
                             @commit="onTagSearchCommit" />

@@ -54,6 +54,7 @@ __all__ = [
     "is_derivative_path_excluded",
     "maybe_rebuild_prompt_vocab_from_config",
     "reconcile_folders_under_root",
+    "reconcile_folders_under_root_block",
 ]
 
 _PathLike = Union[str, Path]
@@ -189,17 +190,7 @@ def _load_prompt_stopwords(db_path: _PathLike) -> frozenset:
 
 
 def _normalized_tag_list(raw: Optional[str]) -> List[str]:
-    if not raw:
-        return []
-    seen: Set[str] = set()
-    out: List[str] = []
-    for part in str(raw).split(","):
-        nt = _vocab.normalize_tag(part)
-        if not nt or nt in seen:
-            continue
-        seen.add(nt)
-        out.append(nt)
-    return out
+    return _vocab.normalized_tag_list_from_csv(raw)
 
 
 def _normalise_favorite(raw: Optional[str]) -> Optional[int]:
@@ -290,10 +281,13 @@ def _iter_image_files(root_path: str) -> Iterable[str]:
 
 # Progress reporting batch size per TASKS T07 ("每 500 条触发一次进度统计").
 _PROGRESS_BATCH: int = 500
+# T44: lighter WS cadence for delta scans (walked / …).
+_DELTA_PROGRESS_STRIDE: int = 200
 
 
 def cold_scan(
-    root: Dict[str, Any], *, db_path: _PathLike, write_queue
+    root: Dict[str, Any], *, db_path: _PathLike, write_queue,
+    job_id: Optional[str] = None,
 ) -> Dict[str, int]:
     """Walk one registered root once, enqueuing upserts for any diffs.
 
@@ -305,12 +299,20 @@ def cold_scan(
     Returns a summary dict ``{walked, skipped, enqueued, errors}`` mostly
     for logging / later telemetry hooks.
     """
+    from . import job_registry as _jobs
+
     root_path = str(root["path"])
     root_id = int(root["id"])
+    jref = str(job_id) if job_id else None
 
     if not os.path.isdir(root_path):
         logger.warning("cold_scan: root path not a directory: %s", root_path)
         return {"walked": 0, "skipped": 0, "enqueued": 0, "errors": 0}
+
+    if jref is not None:
+        _jobs.start_index_job(
+            jref, kind="index", root_id=root_id, phase="cold_scan", message="",
+        )
 
     fingerprints = _load_fingerprints(db_path, root_id)
     extra_sw = _load_prompt_stopwords(db_path)
@@ -319,65 +321,88 @@ def cold_scan(
     skipped = 0
     enqueued = 0
     errors = 0
+    crash = False
 
-    for abs_path in _iter_image_files(root_path):
-        walked += 1
-        key = _normalise_key(abs_path)
-        if not _claim(key):
-            skipped += 1
-            continue
-        try:
-            try:
-                st = os.stat(abs_path)
-            except OSError as exc:
-                errors += 1
-                logger.debug("stat failed for %s: %s", abs_path, exc)
-                continue
-
-            posix_path = Path(abs_path).as_posix()
-            cached = fingerprints.get(posix_path)
-            if cached is not None and cached == (
-                int(st.st_size), int(st.st_mtime_ns)
-            ):
+    try:
+        for abs_path in _iter_image_files(root_path):
+            walked += 1
+            key = _normalise_key(abs_path)
+            if not _claim(key):
                 skipped += 1
                 continue
-
-            meta = _metadata.read_comfy_metadata(abs_path)
-            # NB: meta.errors being non-empty is NOT a reason to skip the
-            # row — we still want the image indexed (filename / size /
-            # dims) even if its prompt chunks are corrupt. PROJECT_STATE
-            # §4 #22: errors are informational; a single broken PNG must
-            # never stall the cold scan (NFR-1).
             try:
-                op = _build_upsert_op(
-                    abs_path=abs_path, root=root,
-                    stat_result=st, meta=meta,
-                    extra_stopwords=extra_sw,
-                )
+                try:
+                    st = os.stat(abs_path)
+                except OSError as exc:
+                    errors += 1
+                    logger.debug("stat failed for %s: %s", abs_path, exc)
+                    continue
+
+                posix_path = Path(abs_path).as_posix()
+                cached = fingerprints.get(posix_path)
+                if cached is not None and cached == (
+                    int(st.st_size), int(st.st_mtime_ns)
+                ):
+                    skipped += 1
+                    continue
+
+                meta = _metadata.read_comfy_metadata(abs_path)
+                # NB: meta.errors being non-empty is NOT a reason to skip the
+                # row — we still want the image indexed (filename / size /
+                # dims) even if its prompt chunks are corrupt. PROJECT_STATE
+                # §4 #22: errors are informational; a single broken PNG must
+                # never stall the cold scan (NFR-1).
+                try:
+                    op = _build_upsert_op(
+                        abs_path=abs_path, root=root,
+                        stat_result=st, meta=meta,
+                        extra_stopwords=extra_sw,
+                    )
+                except Exception:
+                    errors += 1
+                    logger.exception("failed to build op for %s", abs_path)
+                    continue
+
+                write_queue.enqueue_write(_repo.LOW, op)
+                enqueued += 1
+
+                if enqueued and enqueued % _PROGRESS_BATCH == 0:
+                    logger.info(
+                        "cold_scan progress (root=%s): walked=%d enqueued=%d skipped=%d",
+                        root_path, walked, enqueued, skipped,
+                    )
+                if jref is not None and enqueued and enqueued % _PROGRESS_BATCH == 0:
+                    _jobs.emit_index_progress(
+                        jref, done=walked, total=0, root_id=root_id,
+                        phase="cold_scan",
+                        message=f"enqueued {enqueued} (walked {walked})",
+                    )
             except Exception:
                 errors += 1
-                logger.exception("failed to build op for %s", abs_path)
-                continue
+                logger.exception("indexer error for %s", abs_path)
+            finally:
+                _release(key)
 
-            write_queue.enqueue_write(_repo.LOW, op)
-            enqueued += 1
+        logger.info(
+            "cold_scan done (root=%s): walked=%d enqueued=%d skipped=%d errors=%d",
+            root_path, walked, enqueued, skipped, errors,
+        )
+        if jref is not None:
+            _jobs.emit_index_progress(
+                jref, done=walked, total=0, root_id=root_id, phase="cold_scan",
+                message="finishing",
+            )
+        reconcile_folders_under_root(root, db_path=db_path, write_queue=write_queue)
+    except BaseException:
+        crash = True
+        raise
+    finally:
+        if jref is not None:
+            _jobs.emit_index_done(
+                jref, root_id=root_id, phase="cold_scan",
+                ok=0 if crash else 1, failed=1 if crash else 0,
+            )
 
-            if enqueued and enqueued % _PROGRESS_BATCH == 0:
-                logger.info(
-                    "cold_scan progress (root=%s): walked=%d enqueued=%d skipped=%d",
-                    root_path, walked, enqueued, skipped,
-                )
-        except Exception:
-            errors += 1
-            logger.exception("indexer error for %s", abs_path)
-        finally:
-            _release(key)
-
-    logger.info(
-        "cold_scan done (root=%s): walked=%d enqueued=%d skipped=%d errors=%d",
-        root_path, walked, enqueued, skipped, errors,
-    )
-    reconcile_folders_under_root(root, db_path=db_path, write_queue=write_queue)
     return {
         "walked": walked, "skipped": skipped,
         "enqueued": enqueued, "errors": errors,
@@ -461,6 +486,7 @@ def delete_one(
 def delta_scan(
     root: Dict[str, Any], *, db_path: _PathLike, write_queue,
     mode: str = "light",
+    job_id: Optional[str] = None,
 ) -> Dict[str, int]:
     """Light delta scan: ``(size, mtime_ns)`` comparison, no PIL decode.
 
@@ -472,43 +498,74 @@ def delta_scan(
     if mode != "light":
         raise ValueError(f"delta_scan: unknown mode {mode!r}")
 
+    from . import job_registry as _jobs
+
     root_path = str(root["path"])
     root_id = int(root["id"])
     if not os.path.isdir(root_path):
         return {"walked": 0, "changed": 0, "errors": 0}
 
+    jref = str(job_id) if job_id else None
+    if jref is not None:
+        _jobs.start_index_job(
+            jref, kind="index", root_id=root_id, phase="delta", message="",
+        )
+
     fingerprints = _load_fingerprints(db_path, root_id)
     walked = 0
     changed = 0
     errors = 0
+    crash = False
+    deleted_ids: List[int] = []
 
-    for abs_path in _iter_image_files(root_path):
-        walked += 1
-        try:
-            st = os.stat(abs_path)
-        except OSError:
-            errors += 1
-            continue
-        posix_path = Path(abs_path).as_posix()
-        cached = fingerprints.get(posix_path)
-        if cached is not None and cached == (
-            int(st.st_size), int(st.st_mtime_ns)
-        ):
-            continue
-        try:
-            if index_one(
-                abs_path, root=root,
-                db_path=db_path, write_queue=write_queue,
+    try:
+        for abs_path in _iter_image_files(root_path):
+            walked += 1
+            if jref is not None and (
+                walked == 1
+                or (walked % _DELTA_PROGRESS_STRIDE) == 0
             ):
-                changed += 1
-        except Exception:
-            errors += 1
-            logger.exception("delta_scan index_one failed for %s", abs_path)
+                _jobs.emit_index_progress(
+                    jref, done=walked, total=0, root_id=root_id, phase="delta",
+                    message=f"changed {changed} err {errors}",
+                )
+            try:
+                st = os.stat(abs_path)
+            except OSError:
+                errors += 1
+                continue
+            posix_path = Path(abs_path).as_posix()
+            cached = fingerprints.get(posix_path)
+            if cached is not None and cached == (
+                int(st.st_size), int(st.st_mtime_ns)
+            ):
+                continue
+            try:
+                if index_one(
+                    abs_path, root=root,
+                    db_path=db_path, write_queue=write_queue,
+                ):
+                    changed += 1
+            except Exception:
+                errors += 1
+                logger.exception("delta_scan index_one failed for %s", abs_path)
 
-    deleted_ids = _reconcile_missing_disk_rows(
-        root, db_path=db_path, write_queue=write_queue,
-    )
-    reconcile_folders_under_root(root, db_path=db_path, write_queue=write_queue)
+        deleted_ids = _reconcile_missing_disk_rows(
+            root, db_path=db_path, write_queue=write_queue,
+        )
+        reconcile_folders_under_root(
+            root, db_path=db_path, write_queue=write_queue,
+        )
+    except BaseException:
+        crash = True
+        raise
+    finally:
+        if jref is not None:
+            _jobs.emit_index_done(
+                jref, root_id=root_id, phase="delta",
+                ok=0 if crash else 1, failed=1 if crash else 0,
+            )
+
     return {
         "walked": walked,
         "changed": changed,
@@ -623,6 +680,37 @@ def reconcile_folders_under_root(
         )
 
 
+def reconcile_folders_under_root_block(
+    root: Dict[str, Any], *, db_path: _PathLike, write_queue, timeout: float = 120.0,
+) -> None:
+    """Like :func:`reconcile_folders_under_root` but wait for the op to complete.
+
+    Used before the client is told the ``index`` job is finished, so
+    ``folder`` image_count rows match the ``image`` table (T20 watcher follow-up).
+    """
+    try:
+        fut = write_queue.enqueue_write(
+            _repo.LOW,
+            _repo.ReconcileFoldersUnderRootOp(
+                root_id=int(root["id"]),
+                root_path=str(root["path"]),
+                root_kind=str(root["kind"]),
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "reconcile_folders_under_root_block enqueue root_id=%s", root.get("id"),
+        )
+        return
+    try:
+        fut.result(timeout=timeout)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "reconcile_folders_under_root_block wait root_id=%s db_path=%r",
+            root.get("id"), str(db_path),
+        )
+
+
 def _load_roots(db_path: _PathLike) -> List[Dict[str, Any]]:
     conn = _db.connect_read(db_path)
     try:
@@ -638,6 +726,8 @@ def _load_roots(db_path: _PathLike) -> List[Dict[str, Any]]:
 
 
 def _cold_scan_all_worker(db_path: _PathLike, write_queue) -> None:
+    from . import job_registry as _jobs
+
     try:
         roots = _load_roots(db_path)
     except Exception:
@@ -645,7 +735,11 @@ def _cold_scan_all_worker(db_path: _PathLike, write_queue) -> None:
         return
     for root in roots:
         try:
-            cold_scan(root, db_path=db_path, write_queue=write_queue)
+            jid = _jobs.new_job_id()
+            cold_scan(
+                root, db_path=db_path, write_queue=write_queue,
+                job_id=jid,
+            )
         except Exception:
             logger.exception(
                 "indexer: cold_scan crashed for root %s", root.get("path"),

@@ -125,6 +125,28 @@ def test_write_xyz_chunks_clears_mirror_when_none() -> None:
     print("OK test_write_xyz_chunks_clears_mirror_when_none")
 
 
+def test_write_xyz_chunks_atomic_staging_dir() -> None:
+    from gallery import metadata
+
+    wf = json.dumps({"n": 1})
+    with tempfile.TemporaryDirectory() as td:
+        img_dir = Path(td) / "library"
+        img_dir.mkdir()
+        staging = Path(td) / "staging_atomic"
+        staging.mkdir()
+        p = img_dir / "z.png"
+        _make_png(p, workflow_json=wf)
+        metadata.write_xyz_chunks(p, "solo", 0, atomic_staging_dir=staging)
+        assert metadata.read_comfy_metadata(p).tags == "solo"
+        assert not any(
+            n.is_file()
+            and n.name.startswith(metadata.GALLERY_ATOMIC_TMP_PREFIX)
+            and n.name.lower().endswith(".png")
+            for n in img_dir.iterdir()
+        )
+        assert not any(staging.glob(f"{metadata.GALLERY_ATOMIC_TMP_PREFIX}*.png"))
+
+
 def test_set_sync_ops() -> None:
     from gallery import db
     from gallery import repo
@@ -179,6 +201,27 @@ def test_set_sync_ops() -> None:
                 rconn.close()
             assert row["metadata_sync_status"] == "ok"
             assert int(row["version"]) == 2
+
+            fut_sz = wq.enqueue_write(
+                repo.HIGH,
+                repo.SetSyncStatusOp(
+                    image_id=iid,
+                    expected_version=2,
+                    refresh_file_size=42,
+                    refresh_mtime_ns=99,
+                ),
+            )
+            fut_sz.result(timeout=5.0)
+            rconn = db.connect_read(db_path)
+            try:
+                row_sz = rconn.execute(
+                    "SELECT file_size, mtime_ns FROM image WHERE id = ?",
+                    (iid,),
+                ).fetchone()
+            finally:
+                rconn.close()
+            assert int(row_sz["file_size"]) == 42
+            assert int(row_sz["mtime_ns"]) == 99
 
             fut2 = wq.enqueue_write(
                 repo.LOW,
@@ -387,6 +430,7 @@ def test_attempt_sync_non_png_hard_fail() -> None:
 def main() -> None:
     test_write_xyz_chunks_roundtrip()
     test_write_xyz_chunks_clears_mirror_when_none()
+    test_write_xyz_chunks_atomic_staging_dir()
     test_set_sync_ops()
     test_attempt_sync_version_skip_and_success()
     test_attempt_sync_non_png_hard_fail()

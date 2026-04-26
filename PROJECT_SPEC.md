@@ -5,7 +5,7 @@
 > aiohttp routing surface of the host plugin, but is otherwise independent of
 > the existing nodes.
 
-> **Document layering（只增不改旧文）**：MVP（v1.0）正文保持有效；**v1.1** 增量以 §11 *v1.1 Overrides* 为准。若与较早章节字面冲突，以 §11 为**覆盖**说明，旧句视为 **deprecated** 并在 §11 中指明。
+> **Document layering（只增不改旧文）**：MVP（v1.0）正文保持有效；**v1.1** 增量以 §11 *v1.1 Overrides* 为准；**v1.2** 增量以 §12 *v1.2 Overrides* 为准。若与较早章节字面冲突，以**较新**覆盖节为**覆盖**说明，旧句视为 **deprecated** 并在对应覆盖节中指明。
 
 ---
 
@@ -220,6 +220,21 @@ When enabled, each thumbnail gains a checkbox. Additional buttons appear:
   directories**. Folder operations (move, delete) are restricted to paths
   inside one of the registered roots — never arbitrary FS access via the
   API.
+
+* **NFR-20** **UI update stability** (*Updated due to v1.2*): The main grid
+  and detail surfaces must **not** flash or reset scroll position on
+  **per-row** metadata edits driven by WebSocket `image.updated` / local PATCH
+  success; full list replacement is reserved for **query-set changes** (filter
+  / sort / debounced OS upsert that introduces **new ids** not representable
+  by row merge). See `ARCHITECTURE` §7.2–7.4.
+* **NFR-21** **Batch operation visibility** (*Updated due to v1.2 / T44 spec*): Any
+  user-initiated operation that mutates **more than one** indexed image in a
+  **single** user action (or one HTTP execute), **and** any **long-running server job**
+  that the gallery must surface (including **OS-side** bulk changes discovered
+  after the user opens the page — see §12.4 **FR-Prog-5**), must use the **unified
+  long-running job** contract and surface progress and completion in the client
+  (see `PROJECT_SPEC` §12.4), without adding a second write path beside
+  `repo.WriteQueue` + `ws_hub`.
 
 ---
 
@@ -654,7 +669,7 @@ request/response unless noted.
 | Method | Path                                  | Body                                                                                                | Notes |
 | ------ | ------------------------------------- | --------------------------------------------------------------------------------------------------- | ----- |
 | POST   | `/xyz/gallery/bulk/favorite`          | `{ "selection": Selection, "value": bool }`                                                         | Single transaction; emits one `vocab.changed` (no-op) + one summary `image.updated` per affected id. |
-| POST   | `/xyz/gallery/bulk/tags`              | `{ "selection": Selection, "add": [str], "remove": [str] }`                                         | Tags are normalised the same way as prompt tokens (§8.8) before write. |
+| POST   | `/xyz/gallery/bulk/tags`              | `{ "selection": Selection, "add": [str], "remove": [str] }`                                         | Tags are normalised the same way as prompt tokens (§8.8) before write. *（**v1.2 patch / 2026-04-24** — `normalize_tag()`：仍以 `normalize_prompt` 为主路径；若其结果为空，**保留** strip 后长度合法的 **纯数字/小数** 字符串作 gallery 标签，与 **prompt_token** 丢弃纯数字的卫生规则**分离**；见 §8.8 *Gallery tag* 段。）* |
 | POST   | `/xyz/gallery/bulk/move/preflight`    | `{ "selection": Selection, "target_folder_id": int }`                                               | **Phase 1 of the two-phase move (§8.7).** Pure read + in-memory simulation: validates target writability, estimates required free bytes, and returns `{ plan_id, total_bytes, free_bytes, mappings: [{id, src, dst, conflict?: "renamed"\|"clean"}], unresolved_conflicts: [...] }`. No file is touched. |
 | POST   | `/xyz/gallery/bulk/move/execute`      | `{ "plan_id": str, "rename_overrides"?: { "<id>": "<new_name>" } }`                                 | **Phase 2.** Server replays the previously-validated plan, performs every `os.replace`, then commits all path changes inside one SQLite transaction. Partial-failure rollback is best-effort: any successfully-moved file is recorded in the DB before a later failure aborts the plan, so on-disk state is always consistent with the index. |
 | POST   | `/xyz/gallery/bulk/delete`            | `{ "selection": Selection, "confirm": true }`                                                       | Same pre-flight pattern: dry-run resolves the row set first, then physical deletes are batched in 200-row chunks per WS heartbeat. |
@@ -673,6 +688,7 @@ request/response unless noted.
 | Method | Path                              | Notes                                                                 |
 | ------ | --------------------------------- | --------------------------------------------------------------------- |
 | GET    | `/xyz/gallery/index/status`       | `{ scanning: bool, pending_events: int, last_full_scan_at, totals }`. |
+| GET    | `/xyz/gallery/jobs/active`        | **T44**：返回当前**未结束**长作业列表（`job_id`、`kind`、`done`/`total`、`phase`…），供晚到 Web 会话在 WS 可用前挂载 `ProgressModal`（§12.4 **FR-Prog-5**）；**精确 JSON 以 `TASKS`/实现为准**。 |
 | POST   | `/xyz/gallery/index/rebuild`      | Wipes index + thumbnails, re-scans roots in background.               |
 
 ### 7.9 WebSocket
@@ -691,7 +707,12 @@ Event envelope:
 | `image.updated`     | `{ "id": int, "favorite"?, "tags"?, "moved_to"? }`| After a mutation API call                       |
 | `folder.changed`    | `{ "root_id": int }` — client SHOULD `GET /folders` to refresh the tree (`FolderNode` payload comes from HTTP, not inline in WS). *Updated due to runtime implementation / QA feedback.* | After `folder` rows under that root were reconciled with disk (add/remove subdirs) |
 | `index.progress`    | `{ done, total, phase }`                          | During a full scan / rebuild                    |
+| `bulk.progress`     | `{ bulk_id \| plan_id, done, total, kind, … }` | During bulk favorite / tags / move / delete execute（**T44** 归一为 **Job** 进度源之一） |
+| `bulk.completed`    | `{ bulk_id \| plan_id, done, total, kind, failed?, … }` | 对应 bulk 执行结束 |
+| `job.progress` / `job.completed` | *（**T44** 实现时补全；形状须与 `bulk.*` 对齐同一 **Job envelope**，见 §12.4 **FR-Prog-4**）* | Settings 多阶段、其他非 `bulk_id` 形状的长作业 |
 | `vocab.changed`     | `{ "kind": "tag"\|"prompt", "added":[], "removed":[] }` | After tag/prompt vocab deltas             |
+
+> **Active jobs (HTTP, T44).** `GET /xyz/gallery/jobs/active`（**精确路径以 `TASKS`/`routes` 为准**）返回当前进程内**未结束**的长作业摘要（含 `job_id`、`kind`、`done`/`total`、`phase`），供 Web 页**晚到会话**在 WS 首包前渲染 `ProgressModal`（§12.4 **FR-Prog-5**）。
 
 > **Consistency model — deliberately simple.** This is a single-user
 > local plugin. We do **not** introduce per-event sequence numbers, vector
@@ -1221,6 +1242,14 @@ Two consequences worth calling out:
   (`POST /xyz/gallery/bulk/tags`) is run through `normalize_prompt`
   with an empty stopword set so that tags like `My Tag`, `my tag`,
   and `(my tag:1.2)` are treated as a single canonical `my tag`.
+* **（v1.2 patch / 2026-04-24）Gallery `normalize_tag()` — numeric labels.**
+  `vocab.normalize_tag()` still delegates to `normalize_prompt(…, frozenset())` first
+  so weight/LORA unwrap rules stay aligned with the bullet above. **If that pipeline
+  yields no tokens** (including because per-token stage 6 drops **numeric-only**
+  strings that exist only to keep the *prompt* vocabulary bounded), **pure numeric /
+  simple decimal** tag strings after lower-case + whitespace collapse + length checks
+  (≤ 64) are **retained** as user gallery tags (e.g. `111`). This **does not** relax
+  `prompt_token` hygiene inside `normalize_prompt` itself.
 * **Re-indexing is required when the stopword set changes.** A
   config-bump increments `vocab_version` in `gallery_config.json`;
   the indexer detects the bump on next start and re-derives
@@ -1268,7 +1297,7 @@ Two consequences worth calling out:
 
 ## 11. v1.1 Overrides（post-MVP，pre-L4）
 
-> 来源：`gallery_update_description.md`（gallery 初始版本全覆盖后的增量意见）。  
+> 来源：`docs/gallery_update_description.md`（gallery 初始版本全覆盖后的增量意见）。  
 > 分类标签：**DM** = 数据模型 / 索引；**API** = HTTP / 查询语义 / 后台行为；**UI** = 前端交互与视觉。
 
 ### 11.1 变更清单与分类
@@ -1310,4 +1339,109 @@ Two consequences worth calling out:
 ### 11.3 Backward compatibility
 
 - v1.0 行为在 §8.8 第 4 步等处仍可在代码中读到；**v1.1** 通过 **§11 + 代码注释 `@deprecated v1.0`** 双重标记迁移路径。
-- `gallery_update_description.md` 列为需求溯源；实现验收以本文 §11 与 `TASKS.md` Pre-L4 阶段为准。
+- `docs/gallery_update_description.md` 列为需求溯源；实现验收以本文 §11 与 `TASKS.md` Pre-L4 阶段为准。
+
+---
+
+## 12. v1.2 Overrides（设计驱动系统级演进，post v1.1 QA）
+
+> **来源**：`docs/gallery_update_description.md` **v1.2** 段；在 **v1.1 已完成并 QA 通过**（见 `PROJECT_STATE.md`）的前提下，对 **UI/UX、列表渲染行为、批处理可观测性** 做增量规格，**不**推翻 §2–§4、§6–§10、C-1…C-12、§11 已冻结的数据与写入语义。
+>
+> **Updated due to v1.2 planning**：本条为 **v1.2 唯一**覆盖台；与 §2.3.1 **FR-9c** 字面冲突时，以 **§12.2** 为**命名与行为**覆盖说明（v1.0 中 “timeline” 的措辞保留为历史文档，**产品内命名**以 **line view** 为准）。
+
+### 12.1 目标摘要
+
+1. **统一视觉语言**（参考 Apple 相册 / macOS Photos）：主视图、Detail、Settings 共用 **design system**（色板、圆角、动效、滚动条与表单控件在 Light/Dark 下均无“裸白块”与廉价网页感）。
+2. **可发现性**：目录树具 **文件夹图式**（图标、缩进、悬停/选中）；全应用 **统一 icon 系统**；复杂控件旁可选 **`?` + 悬停说明**（不替代必要标签文案）。
+   - *（**v1.1 patch / 2026-04-24 — overrides §12.1 item 2 的「须交付 `?`」解读**）* 经产品决策与 QA：**当前版本不交付** 独立 **`HelpTip` / `?` 悬停浮层**（`TASKS` **T41** 记为 **descoped · closed**）。可发现性仍由**必要标签文案**、Settings、本条 **统一 icon**、及下款 **T39** 目录图式等承担。**优先级**：本 patch **覆盖** item 2 中对「可选 `?`」控件的**实现义务**（不要求仓库内保留 `HelpTip` 类实现）；**不**废除 item 2 其余措辞（icon / 标签仍适用）。主视图筛选区在保存 Settings 后可**一次**将持久化高度收束至可见筛选项的自然高度（上界为侧栏 layout cap 与当前 `filters_pane_height_px` 的较小值），且以 **`.mv-filters-slack`** 吸收筛选项下方多余纵向空间——见 **`ARCHITECTURE`** `MainView` 条 *Updated 2026-04-24*。
+   - *（**Updated due to T39 + QA**）* **主视图目录树不** 在节点标题前显示 **`folder.kind`** 标签（`input` / `output` / `custom` 等）。**`kind`** 为 SQLite `folder` 行在创建/链入时登记的服务端分类，**不是**“当前在 UI 树中视觉父级”的实时说明；在目录 **移动** 后如未在写入路径上重写该列，可能与新父级不一致，故**不作**用户可见前缀。**「All folders」** 与根级行 **同一缩进/行结构**（与 `depth=0` 的 chevron/占位+标签列对齐）。**含子目录过滤的 Recursive 开关** 在 **`MainView` 的 Folders 区标题行** 与 **「Folders」** 同排；`FolderTree` 可通过 **隐藏** 内置 **Recursive 工具条** 避免重复（见 `ARCHITECTURE` `FolderTree` / `MainView` 条、**`showRecursiveButton`** 语义）。*优先级：本条为 §12.1 在 **T39 交付后** 的 UI 细化，与 §2–§11 数据合同无冲突；若与旧版“展示 kind”的**临时**设想冲突，**以本条为准**。*
+3. **消除开发期文案**：占位符、调试字符串不得面向最终用户（例：name filter 的 debounce 说明应移除或换为用户语言）。
+4. **实时与稳定**：在既有 **watcher + 30 s 补偿 delta_scan**（FR-20、NFR-9、`ARCHITECTURE` §4.10）上，**审计并收敛** 前端在 WS / 对账时触发的 **全量重拉** 与布局跳动（见 §12.3）。
+5. **批处理可观测性**：对「影响 **>1** 张已索引图片或等价长时间后端作业」的操作，提供 **统一 Progress 浮层**（进度条 + 处理对象/操作/结果摘要，结束自动关闭）；与既有 **`bulk.progress` / `bulk.completed`（WriteQueue 语义不变）** 对齐，并**收敛**到 **§12.4 长任务统一模型**（含 **`index.progress`**、Settings 阶段、晚到 Web 会话 — 见 **FR-Prog-4 / FR-Prog-5**），而非另建并行管道。
+6. **主视图双模式**：在既有 **紧凑网格（compact）** 外增加 **行分组视图（line view）**（见 §12.2），**排序键与 `SortSpec` 一致**，列表数据仍来自 `GET /xyz/gallery/images` 分页结果（SQLite 为唯一查询源，C-1）。
+
+### 12.2 功能需求 — Main view 布局（覆盖 FR-9c 的命名与线框图）
+
+* **FR-9c（v1.2 覆盖）**：
+  * **Compact view**：**当前已交付**的 **扁平虚拟网格**（`VirtualGrid`），缩略图等卡片尺寸由「每行张数」控制；**不改变** 既有游标分页与 NFR-6 预算。
+  * **Line view**：在 **同一条目序列** 上，按 **当前 `SortSpec`** 将可见（已加载）条目 **分组** 为若干 **section**，每节 **顶栏** 为 **section header**（纯前端布局；**不** 要求后端新增 `GROUP BY` 游标，除非 `TASKS` 为性能单独立项）。**切换** compact ⇄ line **仅** 改变 `stores/filters`（或等效）中的 `view_mode` 与 `localStorage` 持久化，**不** 改变 `FilterSpec` 语义。
+
+* **Line view — section header 的键（**全部基于 **已索引的 `ImageRecord` 字段** 在客户端派生，与 `repo.list_images` 排序列一致**）**：
+
+| `SortSpec.key` | Header 键规则（展示字符串） | 组内顺序 |
+| --- | --- | --- |
+| `time` | 自然日 **`YYYY-MM-DD`（本地时区，不含时分秒）**，取自与列表排序相同的 **创建时间** 字段（`created_at` 语义同 §6.1 / 既有实现） | 同当前 `time` 排序 |
+| `name` | **首字符**分桶：对 **basename 归一**（可沿用 **首字母 + `#`** 对非字母），展示为 `A` / `B` / … / `#` 等 | 同当前 `name` 排序 |
+| `size` | **大小区间**标签，形如 **`≤1000 KiB`–`800 KiB`** 的 **相邻 bin 对**（**bin 边界**在 `TASKS` 固化，须保证 **相邻 section 不重叠、不漏档**；方向 `asc`/`desc` 仅影响 bin 列顺序，不改变键定义） | 同当前 `size` 排序 |
+| `folder` | **已注册根下的相对父目录路径**（POSIX 风格、**无** 前导 `/`），例如 `output/test`、`download`、`download/test2`。**仅** 将 **直接位于该目录下** 的文件（即 `ImageRecord` 的 **`relative_path` 去掉 basename 后** 与该目录段一致）归入该 section；**不** 在父级 section **递归** 收拢子目录内文件。按 **header 路径的字典序 + `SortSpec.dir`** 排 section 顺序。 | 同当前 `folder` 键下序 |
+
+* *（**v1.1 patch / 2026-04-25 — T45 QA，overrides 上表 `folder` 行与历史实现的可能偏差**）* **`GET /xyz/gallery/images`** 在 **`sort=folder`** 时，**服务端** **`ORDER BY`** 与 **游标** 必须使用 **与上表 section header 展示字符串相同的排序键**（根 **`folder.display_name`**，否则 **`folder.kind`**，否则字面 **`(root)`**；若 `relative_path` 在 POSIX 语义下含 `/` 则 **`/` + 父目录段**），**不得** 仅以 **`image.path`** 全路径字典序作为 folder 排序列（否则 compact 与 line 的 folder 顺序与标题脱节、line 追加页时易闪烁）。**实现**：Python 侧 **`gallery/folder_header.py`** + 在 **`gallery/db.connect_read` / `connect_write`** 注册的 SQLite UDF **`xyz_folder_line_header`**；**`repo.list_images` / `neighbors`** 使用该表达式（**`lower(...)`**，别名 **`folder_line_header`**）。**Line view 客户端**：**同 section key** 的合并顺序 **遵循** 已加载列表顺序（**`sectionKeys.partitionItemsForLineView`**），**不** 在分页追加后再单独按标题 **`localeCompare`** 重排全局 section 顺序。主视图筛选 **name / positive prompt / tag** 的 **清除（×）** 与 **输入控件** **同一行**（标签独占上一行），见 **`ARCHITECTURE`** **`MainView`** 与 **`index.html`** **`.mv-field-inputrow`**。
+
+* **v1.0 措辞**：§2.3.1 表中 “**timeline**” 与 “vertical buckets” 的表述，在 v1.2 中**收敛为** **line view**（分段横排缩略行 + 顶栏），避免与音乐/时间轴类 UI 混淆。
+
+### 12.3 非功能需求 — 实时一致与抗闪烁
+
+* **与 §3 对齐**：**NFR-9**（§3.2）、**FR-20**（§2.5，≤2 s 反映）与 `ARCHITECTURE` §4.10 **watcher 心跳 + 补偿 `delta_scan`** 不变；**NFR-20、NFR-21** 的正式编号见 **§3.5 末尾**。
+* **抗闪烁细则**（**实现约束**，不另占 NFR 号）：
+  * 对 **`image.updated`（同 id 在列表中）**、**`image.deleted`**：**in-place 补丁** 或 **行删除**，**避免** 无因清空 `items`。
+  * 对 **`image.upserted`（id 已存在）**：**行合并**；**id 尚不在当前页** 时 **防抖** 全量重拉（与 `MainView` 现实现一致**方向**；毫秒值以代码为准）。
+  * 对 **`folder.changed`、漂移对账**（`index.drift_detected` 等）：允许 **全量** 对账，但须 **尽努力** 保留**可恢复**的滚动/选区（`TASKS` 验收）。
+
+  * *（**v1.1 patch / 2026-04-24 — T43 交付，overrides 上款在实现层的解读**）* **`folder.changed`**：客户端**先**静默刷新目录树（**短去抖** 合并 burst **`GET /folders`**）；**仅当** 事件 **`root_id`** 与**当前**筛选 **`folder_id` 所在注册根**一致（或无法判定根时保守全量）才对 **`GET /images`** 走 **`resetAndFetch`**，否则**仅**更新树、**不**清空网格——对齐 **`ReconcileFoldersUnderRootOp`** 只改 **`folder` 行**、他根 reconcile **不**必使当前列表失效的语义。静默树刷新须在替换 `folders` 数据**前**快照目录区 **`scrollTop`** 并于 DOM 更新后恢复，避免批量操作后滚动条无故归零。**纯路径 bulk move**：服务层 **`UpdateImagePathOp`** 使用 **`refresh_sync=False`** 且**不**对每次移动 **`metadata_sync.notify`**，以避免无元数据变更下的 PNG 整文件回写与 **mtime** 搅动（**PATCH** / 用户编辑元数据路径仍走既有 **`notify`**）。**优先级**：本 patch **细化** §12.3 与 **`TASKS` T43** *Scope supplement*、**`ARCHITECTURE` §7.4** *Updated due to T43*；**不**改变 WS 事件名与 HTTP 合同。
+
+> **Why it must not “flash”**：全量 `images = []` 会抬升 `VirtualGrid` 的 `listGen` 与重绘；v1.2 要求**最小化**该路径。细则见 `ARCHITECTURE` §7.2。
+
+### 12.4 功能需求 — 批处理 Progress 浮层
+
+* **FR-Prog-1** 凡满足以下**任一**的情况，在**执行从用户点击到落库/落盘**的有效阶段（或用户打开页面时已有作业在跑 — **FR-Prog-5**），显示 **全屏或居中的模态**（`ProgressModal` 抽象），并 **冻结** 主画廊交互（与 **NFR-20** 协调：冻结期间避免对半一致列表的写操作；细则见 `TASKS` **T44**）：
+  * **BulkBar**：**favorite / tags / move / delete**；
+  * **Folder 侧**：影响多图的 **rename / move / delete subtree**、**purge** 等（含 `RelocateFolderSubtreeDbOp` 触发的路径重写 + 后续 **rescan**）；
+  * **Settings**：**增删 custom image folder root**、**tag 管理**（删、重命名、清 usage=0 等，若单请求或多阶段管线影响多行即属此类）；
+  * **索引 / 对账**：全量或大规模 **`delta_scan` / rebuild** 等已由 **`index.progress`**（`INDEX_PROGRESS`）承载的步骤，**纳入**同一 Progress 信源（见 **FR-Prog-4**），不得在前端再维护一套脱钩假进度。
+
+* **FR-Prog-2** 模态**至少**含：**进度条**（0–100% 或 已处理/总数；未知总长时 **indeterminate** + 文案）、**处理对象**（如当前文件名/相对路径摘要或阶段名）、**操作**（`move`/`delete`/`reindex`/`tag_rename`/`favorite`/`tags`/`folder_relocate`/`index` 等**枚举短码** + 可本地化标签）、**结果**（ok/fail 计数，失败可折行，**不** 替代审计日志 `gallery_audit.log`）。
+
+* **FR-Prog-3** 正常完成后 **T秒** 内自动关闭（T 在 `TASKS` 给默认，如 0.4–0.8 s，可配置）；**失败/部分失败** 可 **延长展示** 或转 **可关闭 + 留一处 toast**（具体交互 `TASKS` 固化，须 **不** 阻塞单写者队列观察）。
+
+* **FR-Prog-4（长任务统一模型）** 所有需向用户展示的长时间作业**映射到同一逻辑 Job**（字段至少：`job_id`（可与现有 `bulk_id` / `plan_id` 对齐或别名）、`kind`、`phase`（可选）、`done`、`total`（可选）、`message`（可选）、`terminal: ok|partial|failed`）。**事件载体**（实现择一或组合，须在 `ws_hub` 常量 + SPEC wire 表登记）：
+  * 既存 **`bulk.progress` / `bulk.completed`**（`BULK_PROGRESS` / `BULK_COMPLETED`）— **favorite / tags / move / delete** 等；
+  * 既存 **`index.progress`**（`INDEX_PROGRESS`）— 冷启/重扫等；
+  * 非上述形状的长作业（如 Settings 多阶段）**允许**新增 **`job.progress` / `job.completed`**（或 **`op.progress` / `op.completed`**）**同一 envelope** 形状，**禁止**为进度新建第二 `WriteQueue`、第二端口或旁路 SQLite。
+
+* **FR-Prog-5（晚到 Web 会话）** 若用户在**文件管理器**中已完成大规模变更、**服务端索引/DB 仍在处理**，随后才打开 Gallery 页：客户端必须在 **首屏可订阅 WS 之前或之后立即** 获得**当前活跃 Job 的快照**（推荐 **`GET`** 只读 **`/xyz/gallery/.../jobs/active`** 或等价 bootstrap 字段，**精确路径与 JSON 形状由 `TASKS`/`routes` 固化**）。快照非空时 **自动** 打开 `ProgressModal` 并应用与 **FR-Prog-1** 相同的冻结策略；连接 WS 后继续以**同一 `job_id`** 收增量事件，避免双模态。
+
+* **FR-Prog-6（可见性阈值）** **不得**将「≥3 张」等固定张数作为**唯一**门槛。采用 **时间 + 规模** 组合（默认建议：**预计或已耗时 > 300–500 ms** 且/或 **影响行数超过 `TASKS` 给出的下限** 才显示模态；极短批量仅用 **BulkBar 内联** 或静默合并刷新）。具体常量在 `TASKS` **T44** 固化；目标为减少「进度条一闪而过」与 **NFR-20** 冲突的无效全量刷新。
+
+* ***（T44 工程增补 — 批量路径与 metadata 优化，与 §12.3 / T43「纯移动」一致的精神）*** 除 **`execute_move` / `move_single_image`** 已对 **`UpdateImagePathOp`** 使用 **`refresh_sync=False`** 且跳过无谓 **`metadata_sync.notify`** 外，须 **审计** 下列大批次路径是否仍引入 **不必要的 PNG 整文件回写**、**过密 `metadata_sync.notify`**（每图一次唤醒）或 **可合并的 WriteQueue 往返**：
+  * **`bulk_set_favorite`**、**`bulk_edit_tags`**（逐图 `UpdateImageOp` + 逐图 `notify`）；
+  * **`tag_admin_rename` / `tag_admin_delete`**（`RenameTagOp` / `DeleteTagByNameOp` 后对受影响图逐条 `_broadcast_image_updated_tags` → `notify`）；
+  * **`RelocateFolderSubtreeDbOp`（历史表述·deprecated）** ~~已在**单事务**内批量更新路径并置 **`metadata_sync_status=pending`** — …~~  
+    **v1.1 override (2026-04-25)，优先级高于划线段**：**纯磁盘子树重定位**（**`os.rename` / `shutil.move` + 单事务路径改写**）在 **`repo.RelocateFolderSubtreeDbOp`** 中**不**重置 **`metadata_sync_*` 为 `pending`**，与 **`UpdateImagePathOp(refresh_sync=False)`** / **T24** 一致；**不** 触发「仅因换路径」的 **`metadata_sync`** 整文件 PNG 回写。**仍** **不得** 在 relocate 中逐图 `read_comfy_metadata` 入队。若未来某版本需「强制回写侧车」，应显式 **`refresh_sync`-类开关** 或单独 `Resync*`，**不得**再默认把**仅路径变更**与 **`pending` 全库风暴** 绑定。
+
+  * **`execute_delete`**（逐文件 `unlink` 为固有成本；评估是否仅需文档化 **不可** 用「先读后写」替代）；
+  * **custom root 注册/移除** 与 **`folder_schedule_rescan`** 触发的 **`indexer.delta_scan`**（与 **FR-Prog-4** 的 **`index.progress`** 合流）。
+
+  上述优化的**验收**写进 **`TASKS.md` T44**（可含子 bullet）；**不改变** C-1 单写者与 **`metadata.write_xyz_chunks`** 原子语义的前提下，优先 **合并唤醒 / 合并事务 / 去冗余 `notify`**。
+
+* **与架构对齐**：进度 **信源** 以 **既存 WS** 为首选；`stores/connection`（或单一 composable）**归一**订阅 **`bulk.*` / `index.progress` /（新增）`job.*`** 后喂给 `ProgressModal`。**禁止** 为进度另开端口或旁路 `repo` / `ws_hub`（C-1、解耦原则不变）。
+
+### 12.5 设计约束与反模式（给实现与未来 AI）
+
+* **Design 约束**：
+  * 所有**新**或**改** 的 **visual** 需通过 **`index.html` 内 CSS 变量**（与现有 `--xyz-*` 体系统一）或**同一** stylesheet 中 **token**，**禁止** 在组件上散落硬编码色值作长期方案（一次性 hotfix 须在 `TASKS` 登记为清债）。
+  * **Detail 与 Main** 的 `input` / `textarea` / `select` 与**滚动条** 在 **Dark** 下须与主网格区域 **同对比度曲线**（无#fff 槽、无未设 `color-scheme` 的裸控件）。
+
+* **Anti-patterns（禁止）**：
+  * 以 **内联 `style=…`** 替代 design token 作为**默认**手段。
+  * 用 **纯文字 “Back”/链接色** 充当**全应用**返回 affordance，而 **v1.2 交付** 中已有 **统一 IconButton** 时仍不迁移。（*Updated due to T40*：核心返回路径已落地为 **`js/gallery_dist/components/IconButton.js`** + **`index.html`** 内 **`.ib*`**；**`app.js` 顶栏** 品牌/设置入口**仍**可为文字链，**不**以此条单独构成回归。）
+  * 把 **内部列名/队列名/毫秒 debounce** 暴露为 **用户可见** placeholder 或 label。
+  * 为 “line view” **单独** 维护第二套列表 truth（**禁止** 第二 SQLite 或旁路 state）；**唯一** 主列表仍为 **REST + 与 MainView 共享的 reactive 数组**。
+
+### 12.6 与 L4 的关系
+
+* **v1.2 不** 以 **L4**（T26–T28）为前置，除非 `TASKS` 某条显式写 **依赖 T26/T28**；**line view 分组** 不得 **依赖** FTS5 或进程池**语义**（仅为可选性能优化让路）。
+
+### 12.7 Backward compatibility
+
+* 覆盖节 **不** 删除 v1.0 / v1.1 API；**view_mode** 与 **Progress** 为增量子状态；`SortSpec` wire **不变**。
+* `docs/gallery_update_description.md` **v1.2** 为需求溯源；实现与验收以 **本文 §12** 与 `TASKS.md` **v1.2 段** 为准。

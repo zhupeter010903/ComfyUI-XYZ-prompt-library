@@ -13,11 +13,14 @@ import { MainView } from './views/MainView.js';
 import { DetailView } from './views/DetailView.js';
 import { SettingsView } from './views/SettingsView.js';
 import { DownloadPickModal } from './components/DownloadPickModal.js';
+import { IconButton } from './components/IconButton.js';
 import { startGalleryConnection } from './stores/connection.js';
 import {
   applyServerPreferences,
   applyThemeToDocument,
 } from './stores/gallerySettings.js';
+import { ProgressModal } from './components/ProgressModal.js';
+import { initGalleryProgress, bootstrapJobsActive, progressMainFrozen } from './stores/galleryProgress.js';
 
 function parseHash() {
   const raw = (location.hash || '').replace(/^#/, '');
@@ -41,12 +44,13 @@ window.addEventListener('hashchange', () => {
 
 const NotFoundView = {
   name: 'NotFoundView',
+  components: { IconButton },
   props: { raw: { type: String, default: '' } },
   template: `
     <section>
       <h2>Not Found</h2>
       <p>No route for: <code>#{{ raw }}</code></p>
-      <p><a href="#/">&larr; Home</a></p>
+      <p><IconButton href="#/" class="ib" text="Home" title="Back to gallery" /></p>
     </section>
   `,
 };
@@ -54,7 +58,7 @@ const NotFoundView = {
 const App = {
   name: 'App',
   components: {
-    MainView, DetailView, SettingsView, NotFoundView, DownloadPickModal,
+    MainView, DetailView, SettingsView, NotFoundView, DownloadPickModal, ProgressModal,
   },
   setup() {
     const settingsHref = computed(() => {
@@ -70,6 +74,8 @@ const App = {
 
     onMounted(() => {
       startGalleryConnection();
+      initGalleryProgress();
+      void bootstrapJobsActive();
       void (async () => {
         try {
           const p = await api.fetchGalleryPreferences();
@@ -85,7 +91,9 @@ const App = {
       window.location.hash = h.startsWith('#') ? h.slice(1) : h;
     }
 
-    return { route, settingsHref, settingsBackHref, closeSettingsOverlay };
+    return {
+      route, settingsHref, settingsBackHref, closeSettingsOverlay, progressMainFrozen,
+    };
   },
   template: `
     <div class="app-root">
@@ -94,7 +102,13 @@ const App = {
         <span class="muted">MVP shell</span>
         <a class="mv-settings" :href="settingsHref">Settings</a>
       </div>
-      <main class="content" :class="{ 'content--settings-bg': route.settingsOpen }">
+      <main
+        class="content"
+        :class="{
+          'content--settings-bg': route.settingsOpen,
+          'content--progress-frozen': progressMainFrozen
+        }"
+      >
         <MainView v-if="route.name === 'home'" />
         <DetailView
           v-else-if="route.name === 'detail'"
@@ -109,6 +123,7 @@ const App = {
           <SettingsView :back-href="settingsBackHref" />
         </div>
       </div>
+      <ProgressModal />
       <DownloadPickModal />
     </div>
   `,

@@ -7,11 +7,12 @@ Pure string transforms only: no SQLite, no HTTP, no repo imports
 from __future__ import annotations
 
 import re
-from typing import FrozenSet, List, Optional, Tuple
+from typing import FrozenSet, List, Optional, Set, Tuple
 
 __all__ = [
     "normalize_prompt",
     "normalize_tag",
+    "normalized_tag_list_from_csv",
     "normalize_stored_model",
     "split_positive_prompt_words",
     "PROMPT_VOCAB_PIPELINE_VERSION",
@@ -139,9 +140,45 @@ def normalize_prompt(
 
 
 def normalize_tag(text: Optional[str]) -> str:
-    """Reuse §8.8 with an empty stopword set; collapse to one display string."""
+    """Gallery tag wire → one display string (lower/strip, max 64 chars).
+
+    Reuses ``normalize_prompt`` (§8.8) for LoRA/weighted unwrap so
+    ``(my tag:1.2)`` still yields ``my tag`` (T15 contract). Pure-numeric
+    tokens are **dropped** by the prompt pipeline for vocab hygiene; tags
+    intentionally keep them (e.g. ``111``, ``1.2``).
+    """
+    if text is None:
+        return ""
+    raw = str(text).strip()
+    if not raw:
+        return ""
     parts = normalize_prompt(text, frozenset())
-    return " ".join(parts)
+    joined = " ".join(parts).strip()
+    if joined:
+        return joined
+    s = raw.lower()
+    s = _RE_WS.sub(" ", s).strip()
+    s = _strip_trailing_ascii_periods(s)
+    if not s or len(s) > 64:
+        return ""
+    if _RE_NUM_ONLY.match(s):
+        return s
+    return ""
+
+
+def normalized_tag_list_from_csv(raw: Optional[str]) -> List[str]:
+    """``image.tags_csv`` wire → ordered unique display tags (T15, matches indexer)."""
+    if not raw:
+        return []
+    seen: Set[str] = set()
+    out: List[str] = []
+    for part in str(raw).split(","):
+        nt = normalize_tag(part)
+        if not nt or nt in seen:
+            continue
+        seen.add(nt)
+        out.append(nt)
+    return out
 
 
 def split_positive_prompt_words(raw: Optional[str]) -> Tuple[str, ...]:
